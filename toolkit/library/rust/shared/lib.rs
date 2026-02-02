@@ -142,6 +142,8 @@ extern crate dap_ffi;
 extern crate data_encoding_ffi;
 
 extern crate binary_http;
+extern crate lockstore_ffi;
+extern crate lockstore_rs;
 extern crate mls_gk;
 extern crate oblivious_http;
 

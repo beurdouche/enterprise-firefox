@@ -31,6 +31,7 @@
 #include "mozilla/dom/MIDIPlatformService.h"
 #include "mozilla/dom/MIDIPortParent.h"
 #include "mozilla/dom/MLSTransactionParent.h"
+#include "mozilla/security/lockstore/LockstoreParent.h"
 #include "mozilla/dom/MessagePortParent.h"
 #include "mozilla/dom/PGamepadEventChannelParent.h"
 #include "mozilla/dom/PGamepadTestChannelParent.h"
@@ -1175,6 +1176,52 @@ mozilla::ipc::IPCResult BackgroundParentImpl::RecvHasMIDIDevice(
                resolver(r.IsResolve() && r.ResolveValue());
              });
 
+  return IPC_OK();
+}
+
+// NOTE: Only accessed on the background thread.
+static StaticRefPtr<nsISerialEventTarget> sLockstoreTaskQueue;
+
+class LockstoreTaskQueueShutdownTask final : public nsITargetShutdownTask {
+ public:
+  NS_DECL_THREADSAFE_ISUPPORTS
+
+  void TargetShutdown() override { sLockstoreTaskQueue = nullptr; }
+
+ private:
+  ~LockstoreTaskQueueShutdownTask() = default;
+};
+
+NS_IMPL_ISUPPORTS(LockstoreTaskQueueShutdownTask, nsITargetShutdownTask)
+
+mozilla::ipc::IPCResult BackgroundParentImpl::RecvCreateLockstoreTransaction(
+    Endpoint<mozilla::security::lockstore::PLockstoreParent>&& aEndpoint) {
+  AssertIsInMainProcess();
+  AssertIsOnBackgroundThread();
+
+  if (!aEndpoint.IsValid()) {
+    return IPC_FAIL(this, "invalid endpoint for Lockstore");
+  }
+
+  if (!sLockstoreTaskQueue) {
+    nsCOMPtr<nsISerialEventTarget> taskQueue;
+    MOZ_ALWAYS_SUCCEEDS(NS_CreateBackgroundTaskQueue(
+        "LockstoreTaskQueue", getter_AddRefs(taskQueue)));
+    sLockstoreTaskQueue = taskQueue.forget();
+
+    nsCOMPtr<nsITargetShutdownTask> shutdownTask =
+        new LockstoreTaskQueueShutdownTask();
+    MOZ_ALWAYS_SUCCEEDS(
+        GetCurrentSerialEventTarget()->RegisterShutdownTask(shutdownTask));
+  }
+
+  sLockstoreTaskQueue->Dispatch(NS_NewRunnableFunction(
+      "CreateLockstoreTransactionRunnable",
+      [endpoint = std::move(aEndpoint)]() mutable {
+        RefPtr<mozilla::security::lockstore::PLockstoreParent> result =
+            new mozilla::security::lockstore::LockstoreParent();
+        endpoint.Bind(result);
+      }));
   return IPC_OK();
 }
 
