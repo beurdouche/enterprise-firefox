@@ -17906,6 +17906,12 @@
   value: false
   mirror: always
 
+# Enable keystore file for enterprise storage encryption.
+- name: security.storage.encryption.sqlite.enabled
+  type: bool
+  value: false
+  mirror: once
+
 - name: security.tls13.aes_128_gcm_sha256
   type: RelaxedAtomicBool
   value: true

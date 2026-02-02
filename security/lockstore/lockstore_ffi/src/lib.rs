@@ -108,6 +108,7 @@ pub extern "C" fn lockstore_keystore_open(profile_path: &nsACString) -> nsresult
 pub extern "C" fn lockstore_keystore_create_dek(
     collection: &nsACString,
     security_level: LockstoreSecurityLevel,
+    extractable: bool,
 ) -> nsresult {
     log::debug!("lockstore_keystore_create_dek");
 
@@ -131,10 +132,52 @@ pub extern "C" fn lockstore_keystore_create_dek(
         &coll_str,
         security_level.into(),
         lockstore_rs::DEFAULT_CIPHER_SUITE,
+        extractable,
     ) {
         Ok(_) => {
-            log::info!("DEK created for collection: {}", coll_str);
+            log::info!(
+                "DEK created for collection: {} (extractable={})",
+                coll_str,
+                extractable
+            );
             NS_OK
+        }
+        Err(e) => error_to_nsresult(e),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn lockstore_keystore_get_dek(
+    collection: &nsACString,
+    ret_dek: &mut ThinVec<u8>,
+) -> nsresult {
+    log::debug!("lockstore_keystore_get_dek");
+
+    if collection.is_empty() {
+        log::error!("Collection cannot be empty");
+        return NS_ERROR_INVALID_ARG;
+    }
+
+    let coll_str = collection.to_utf8();
+
+    let keystore_guard = KEYSTORE.lock().unwrap();
+    let keystore = match keystore_guard.as_ref() {
+        Some(k) => k,
+        None => {
+            log::error!("Keystore not opened");
+            return NS_ERROR_NOT_AVAILABLE;
+        }
+    };
+
+    match keystore.get_dek(&coll_str) {
+        Ok((dek_bytes, _cipher_suite, _security_level)) => {
+            *ret_dek = dek_bytes.into();
+            log::debug!("DEK retrieved for collection: {}", coll_str);
+            NS_OK
+        }
+        Err(LockstoreKeystoreError::NotExtractable(msg)) => {
+            log::error!("DEK not extractable: {}", msg);
+            NS_ERROR_NOT_AVAILABLE
         }
         Err(e) => error_to_nsresult(e),
     }

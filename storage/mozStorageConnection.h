@@ -10,6 +10,7 @@
 #include "nsCOMPtr.h"
 #include "mozilla/Atomics.h"
 #include "mozilla/Mutex.h"
+#include "nsIPrefBranch.h"
 #include "nsProxyRelease.h"
 #include "nsThreadUtils.h"
 #include "nsIInterfaceRequestor.h"
@@ -101,6 +102,15 @@ class Connection final : public mozIStorageConnection,
    *        does not exist.
    */
   nsresult initialize(nsIFile* aDatabaseFile);
+
+  /**
+   * Creates the connection to the encrypted database.
+   *
+   * @param aDatabaseFile
+   *        The nsIFile of the location of the database to open, or create if it
+   *        does not exist.
+   */
+  nsresult initializeSecure(nsIFile* aDatabaseFile);
 
   /**
    * Creates the connection to the database.
@@ -511,6 +521,13 @@ class Connection final : public mozIStorageConnection,
   bool mConnectionClosed;
 
   /**
+   * Set to true if the underlying database file is encrypted on disk.
+   *
+   * If true, the database file is stored at '`mDatabaseFile`.enc'.
+   */
+  bool mDatabaseEncrypted;
+
+  /**
    * Stores the growth increment chunk size, set through SetGrowthIncrement().
    */
   Atomic<int32_t> mGrowthChunkSize;
@@ -522,6 +539,8 @@ class Connection final : public mozIStorageConnection,
    */
   nsTHashSet<nsCString> mLoadedExtensions
       MOZ_GUARDED_BY(sharedAsyncExecutionMutex);
+
+  nsCOMPtr<nsIPrefBranch> mPrefBranch;
 };
 
 /**
@@ -561,6 +580,9 @@ class CallbackComplete final : public Runnable {
   // is not a good idea (and crashes XPConnect).
   RefPtr<mozIStorageCompletionCallback> mCallback;
 };
+
+nsresult GetSqliteEncryptionKey(nsIFile* aFile, nsCString& aKeyHex);
+nsresult GetSqliteEncryptionKeyForPath(const char* aPath, nsCString& aKeyHex);
 
 }  // namespace mozilla::storage
 

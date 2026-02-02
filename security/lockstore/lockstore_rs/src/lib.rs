@@ -72,6 +72,8 @@ pub enum LockstoreKeystoreError {
     Decryption(String),
     #[error("Invalid configuration: {0}")]
     InvalidConfiguration(String),
+    #[error("Key is not extractable: {0}")]
+    NotExtractable(String),
 }
 
 impl From<serde_json::Error> for LockstoreKeystoreError {
@@ -136,6 +138,8 @@ struct DekMetadata {
     cipher_suite: String,
     security_level: String,
     kek_ref: String,
+    #[serde(default)]
+    extractable: bool,
 }
 
 // ============================================================================
@@ -225,11 +229,13 @@ impl LockstoreKeystore {
     /// * `collection_name` - Name of the collection (e.g., "com.mozilla.logins")
     /// * `security_level` - Security level for this collection
     /// * `cipher_suite` - Cipher suite to use for encryption
+    /// * `extractable` - Whether the raw DEK bytes can be retrieved via get_dek
     pub fn create_dek(
         &self,
         collection_name: &str,
         security_level: SecurityLevel,
         cipher_suite: CipherSuite,
+        extractable: bool,
     ) -> Result<(), LockstoreKeystoreError> {
         let dek_key = format!("{}{}", DEK_PREFIX, collection_name);
 
@@ -260,6 +266,7 @@ impl LockstoreKeystore {
             cipher_suite: cipher_suite.as_str().to_string(),
             security_level: security_level.as_str().to_string(),
             kek_ref: Self::get_kek_key_for_security_level(security_level),
+            extractable,
         };
 
         // Store metadata
@@ -270,20 +277,11 @@ impl LockstoreKeystore {
         Ok(())
     }
 
-    /// Gets a DEK for a collection
-    ///
-    /// Retrieves and unwraps the DEK for the specified collection.
-    /// Returns an error if the DEK doesn't exist.
-    ///
-    /// # Arguments
-    /// * `collection_name` - Name of the collection
-    ///
-    /// # Returns
-    /// Tuple of (dek_bytes, cipher_suite, security_level)
-    pub fn get_dek(
+    /// Gets a DEK for a collection (internal - does not check extractable flag)
+    fn get_dek_internal(
         &self,
         collection_name: &str,
-    ) -> Result<(Vec<u8>, CipherSuite, SecurityLevel), LockstoreKeystoreError> {
+    ) -> Result<(Vec<u8>, CipherSuite, SecurityLevel, bool), LockstoreKeystoreError> {
         let dek_key = format!("{}{}", DEK_PREFIX, collection_name);
 
         let db = Database::new(&self.store, &self.db_key);
@@ -347,6 +345,46 @@ impl LockstoreKeystore {
         // Unwrap the DEK
         let dek = crypto::decrypt_with_key(&metadata.wrapped_dek, &kek, cipher_suite)?;
 
+        Ok((dek, cipher_suite, security_level, metadata.extractable))
+    }
+
+    /// Gets a DEK for a collection
+    ///
+    /// Retrieves and unwraps the DEK for the specified collection.
+    /// Returns an error if the DEK doesn't exist or is not extractable.
+    ///
+    /// # Arguments
+    /// * `collection_name` - Name of the collection
+    ///
+    /// # Returns
+    /// Tuple of (dek_bytes, cipher_suite, security_level)
+    pub fn get_dek(
+        &self,
+        collection_name: &str,
+    ) -> Result<(Vec<u8>, CipherSuite, SecurityLevel), LockstoreKeystoreError> {
+        let (dek, cipher_suite, security_level, extractable) =
+            self.get_dek_internal(collection_name)?;
+
+        if !extractable {
+            return Err(LockstoreKeystoreError::NotExtractable(format!(
+                "DEK for '{}' is not extractable",
+                collection_name
+            )));
+        }
+
+        Ok((dek, cipher_suite, security_level))
+    }
+
+    /// Gets a DEK for datastore use (does not check extractable flag)
+    ///
+    /// This is used internally by LockstoreDatastore for encryption/decryption operations.
+    /// Unlike get_dek, this works for both extractable and non-extractable keys.
+    pub(crate) fn get_dek_for_datastore(
+        &self,
+        collection_name: &str,
+    ) -> Result<(Vec<u8>, CipherSuite, SecurityLevel), LockstoreKeystoreError> {
+        let (dek, cipher_suite, security_level, _extractable) =
+            self.get_dek_internal(collection_name)?;
         Ok((dek, cipher_suite, security_level))
     }
 
@@ -479,8 +517,8 @@ impl LockstoreDatastore {
         collection_name: String,
         keystore: Arc<LockstoreKeystore>,
     ) -> Result<Self, LockstoreKeystoreError> {
-        // Validate that DEK exists for this collection
-        keystore.get_dek(&collection_name)?;
+        // Validate that DEK exists for this collection (any DEK, extractable or not)
+        keystore.get_dek_for_datastore(&collection_name)?;
 
         let store_path = match data_path {
             Some(p) => StorePath::OnDisk(p),
@@ -514,8 +552,9 @@ impl LockstoreDatastore {
 
         let plaintext = serde_json::to_vec(&stored)?;
 
-        // Get DEK from keystore
-        let (dek, cipher_suite, _security_level) = self.keystore.get_dek(&self.collection_name)?;
+        // Get DEK from keystore (works for both extractable and non-extractable)
+        let (dek, cipher_suite, _security_level) =
+            self.keystore.get_dek_for_datastore(&self.collection_name)?;
 
         // Always encrypt
         let data_to_store = crypto::encrypt_with_key(&plaintext, &dek, cipher_suite)?;
@@ -550,8 +589,9 @@ impl LockstoreDatastore {
 
         let stored_bytes = utils::value_to_bytes(&value)?;
 
-        // Get DEK from keystore
-        let (dek, cipher_suite, _security_level) = self.keystore.get_dek(&self.collection_name)?;
+        // Get DEK from keystore (works for both extractable and non-extractable)
+        let (dek, cipher_suite, _security_level) =
+            self.keystore.get_dek_for_datastore(&self.collection_name)?;
 
         // Always decrypt
         let plaintext = crypto::decrypt_with_key(&stored_bytes, &dek, cipher_suite)?;

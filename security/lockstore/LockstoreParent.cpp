@@ -25,12 +25,27 @@ mozilla::ipc::IPCResult LockstoreParent::RecvRequestKeystoreOpen(
 }
 
 mozilla::ipc::IPCResult LockstoreParent::RecvRequestKeystoreCreateDek(
-    const nsACString& aCollection,
+    const nsACString& aCollection, bool aExtractable,
     RequestKeystoreCreateDekResolver&& aResolver) {
   nsCString collection(aCollection);
-  nsresult rv = lockstore_keystore_create_dek(&collection,
-                                              LockstoreSecurityLevel::LocalKey);
+  nsresult rv = lockstore_keystore_create_dek(
+      &collection, LockstoreSecurityLevel::LocalKey, aExtractable);
   aResolver(rv);
+  return IPC_OK();
+}
+
+mozilla::ipc::IPCResult LockstoreParent::RecvRequestKeystoreGetDek(
+    const nsACString& aCollection, RequestKeystoreGetDekResolver&& aResolver) {
+  nsCString collection(aCollection);
+  nsTArray<uint8_t> dek;
+  nsresult rv = lockstore_keystore_get_dek(&collection, &dek);
+  if (NS_FAILED(rv)) {
+    aResolver(std::make_tuple(rv, mozilla::Maybe<RawBytes>()));
+    return IPC_OK();
+  }
+  RawBytes rawBytes;
+  rawBytes.data().AppendElements(dek.Elements(), dek.Length());
+  aResolver(std::make_tuple(rv, mozilla::Some(std::move(rawBytes))));
   return IPC_OK();
 }
 

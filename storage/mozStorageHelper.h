@@ -323,4 +323,13 @@ class MOZ_STACK_CLASS mozStorageStatementScoper {
 // queries are stable in the face of source code changes.
 #define MOZ_STORAGE_UNIQUIFY_QUERY_STR "/* " __FILE__ " */ "
 
+class nsIFile;
+
+namespace mozilla::storage {
+
+nsresult GetSqliteEncryptionKey(nsIFile* aFile, nsCString& aKeyHex);
+nsresult GetSqliteEncryptionKeyForPath(const char* aPath, nsCString& aKeyHex);
+
+}  // namespace mozilla::storage
+
 #endif /* MOZSTORAGEHELPER_H */

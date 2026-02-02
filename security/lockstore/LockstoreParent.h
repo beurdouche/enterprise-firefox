@@ -25,8 +25,11 @@ class LockstoreParent final : public PLockstoreParent {
       const nsACString& aProfilePath, RequestKeystoreOpenResolver&& aResolver);
 
   mozilla::ipc::IPCResult RecvRequestKeystoreCreateDek(
-      const nsACString& aCollection,
+      const nsACString& aCollection, bool aExtractable,
       RequestKeystoreCreateDekResolver&& aResolver);
+
+  mozilla::ipc::IPCResult RecvRequestKeystoreGetDek(
+      const nsACString& aCollection, RequestKeystoreGetDekResolver&& aResolver);
 
   mozilla::ipc::IPCResult RecvRequestKeystoreDeleteDek(
       const nsACString& aCollection,

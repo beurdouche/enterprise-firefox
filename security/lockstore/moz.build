@@ -26,11 +26,13 @@ EXPORTS.mozilla.security.lockstore += [
     "LockstoreChild.h",
     "LockstoreIPCUtils.h",
     "LockstoreParent.h",
+    "LockstoreService.h",
 ]
 
 UNIFIED_SOURCES += [
     "LockstoreChild.cpp",
     "LockstoreParent.cpp",
+    "LockstoreService.cpp",
 ]
 
 include("/ipc/chromium/chromium-config.mozbuild")
