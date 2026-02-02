@@ -6,7 +6,10 @@
 
 #include "BaseVFS.h"
 #include "ErrorList.h"
+#include "mozilla/security/KeyStorage.h"
+#include "ScopedNSSTypes.h"
 #include "nsError.h"
+#include "nsLocalFile.h"
 #include "nsThreadUtils.h"
 #include "nsIFile.h"
 #include "nsIFileURL.h"
@@ -22,6 +25,7 @@
 #include "mozilla/dom/quota/QuotaObject.h"
 #include "mozilla/ScopeExit.h"
 #include "mozilla/SpinEventLoopUntil.h"
+#include "mozilla/StaticPrefs_security.h"
 #include "mozilla/StaticPrefs_storage.h"
 
 #include "mozIStorageCompletionCallback.h"
@@ -251,6 +255,29 @@ void basicFunctionHelper(sqlite3_context* aCtx, int aArgc,
     ::sqlite3_result_error(aCtx, "User function returned invalid data type",
                            -1);
   }
+}
+
+nsresult ExtractURIPathAndQuery(const char* uri, nsCString& path,
+                                nsCString& query) {
+  if (strstr(uri, "file:") != uri) {
+    return NS_ERROR_FAILURE;
+  }
+  const char* queryDelim = strstr(uri, "?");
+  // strstr returns nullptr if it can't find "?" or aPath if it is empty
+  if (!queryDelim || queryDelim == uri) {
+    return NS_ERROR_FAILURE;
+  }
+
+  path.AssignASCII(mozilla::Span<const char>(uri + 5, queryDelim));
+  query.AssignASCII(
+      mozilla::Span<const char>(queryDelim + 1, uri + strlen(uri)));
+
+#ifdef _WIN32
+  path.ReplaceChar('\\', '/');
+  if (std::isalpha(path[0])) path.Insert('/', 0);
+#endif
+
+  return NS_OK;
 }
 
 RefPtr<QuotaObject> GetQuotaObject(sqlite3_file* aFile, bool obfuscatingVFS) {
@@ -807,6 +834,7 @@ Connection::Connection(Service* aService, int aFlags,
       mOpenNotExclusive(aOpenNotExclusive),
       mAsyncExecutionThreadShuttingDown(false),
       mConnectionClosed(false),
+      mDatabaseEncrypted(false),
       mGrowthChunkSize(0) {
   MOZ_ASSERT(!mIgnoreLockingMode || mFlags & SQLITE_OPEN_READONLY,
              "Can't ignore locking for a non-readonly connection!");
@@ -1070,6 +1098,13 @@ nsresult Connection::initialize(nsIFile* aDatabaseFile) {
                "Initialize called on already opened database!");
   AUTO_PROFILER_LABEL("Connection::initialize", OTHER);
 
+  // fixme: permissions.sqlite is the only shared cache DB and it breaks both
+  // the pref fetch and EnsureNSSInitializedChromeOrContent
+  if ((mFlags & SQLITE_OPEN_SHAREDCACHE) == 0 &&
+      StaticPrefs::security_storage_encryption_sqlite_enabled_AtStartup()) {
+    return initializeSecure(aDatabaseFile);
+  }
+
   // Do not set mFileURL here since this is database does not have an associated
   // URL.
   mDatabaseFile = aDatabaseFile;
@@ -1120,6 +1155,58 @@ nsresult Connection::initialize(nsIFile* aDatabaseFile) {
       mDBConn = nullptr;
     }
   }
+
+  RecordOpenStatus(rv);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  return NS_OK;
+}
+
+nsresult Connection::initializeSecure(nsIFile* aDatabaseFile) {
+  NS_ASSERTION(aDatabaseFile, "Passed null file!");
+  NS_ASSERTION(!connectionReady(),
+               "Initialize called on already opened database!");
+  AUTO_PROFILER_LABEL("Connection::initializeSecure", OTHER);
+
+  MOZ_RELEASE_ASSERT(EnsureNSSInitializedChromeOrContent(),
+                     "Could not initialize NSS.");
+
+  nsresult rv;
+
+  // Get the key for the database from the key storage.
+  nsCString aDBKey;
+  rv = key::GetKeyForFile(aDatabaseFile, aDBKey);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  // Do not set mFileURL here since this is database does not have an associated
+  // URL.
+  mDatabaseFile = aDatabaseFile;
+  mDatabaseEncrypted = true;
+
+  nsAutoString dbPath;
+  aDatabaseFile->GetPath(dbPath);
+
+#ifdef _WIN32
+  dbPath.ReplaceChar('\\', '/');
+  if (std::isalpha(dbPath[0])) dbPath.Insert('/', 0);
+#endif
+
+  // Create URI to pass key to obfsvfs. Encrypted database paths get the .enc
+  // suffix so they don't overwrite existing, unencrypted files.
+  nsAutoCString dbSpec =
+      "file:"_ns + NS_ConvertUTF16toUTF8(dbPath) + ".enc?key="_ns + aDBKey;
+
+  int srv = ::sqlite3_open_v2(dbSpec.get(), &mDBConn, mFlags | SQLITE_OPEN_URI,
+                              obfsvfs::GetVFSName());
+  if (srv != SQLITE_OK) {
+    ::sqlite3_close(mDBConn);
+    mDBConn = nullptr;
+    rv = convertResultCode(srv);
+    RecordOpenStatus(rv);
+    return rv;
+  }
+
+  rv = initializeInternal();
 
   RecordOpenStatus(rv);
   NS_ENSURE_SUCCESS(rv, rv);
@@ -1978,6 +2065,19 @@ nsresult Connection::initializeClone(Connection* aClone, bool aReadOnly) {
           rv = aClone->CreateStatement("ATTACH DATABASE :path AS "_ns + name,
                                        getter_AddRefs(attachStmt));
           NS_ENSURE_SUCCESS(rv, rv);
+
+          if (mDatabaseEncrypted) {
+            nsCString aDBKey;
+            rv = key::GetKeyForPath(path.get(), aDBKey);
+            NS_ENSURE_SUCCESS(rv, rv);
+#ifdef _WIN32
+            path.ReplaceChar('\\', '/');
+            if (std::isalpha(path[0])) path.Insert('/', 0);
+#endif
+            // Create a URI to pass the key to obfsvfs
+            path =
+                nsPrintfCString("file:%s.enc?key=%s", path.get(), aDBKey.get());
+          }
           rv = attachStmt->BindUTF8StringByName("path"_ns, path);
           NS_ENSURE_SUCCESS(rv, rv);
           rv = attachStmt->Execute();
@@ -2586,6 +2686,67 @@ Connection::CreateTable(const char* aTableName, const char* aTableSchema) {
   int srv = executeSql(mDBConn, buf.get());
 
   return convertResultCode(srv);
+}
+
+NS_IMETHODIMP
+Connection::AttachDatabase(const char* aPath, const char* aName,
+                           mozIStorageStatementCallback* aCallback,
+                           mozIStoragePendingStatement** _handle) {
+  nsresult rv;
+  nsCString uri;
+
+  bool encryptionEnabled =
+      StaticPrefs::security_storage_encryption_sqlite_enabled_AtStartup();
+  if (encryptionEnabled) {
+    nsCString aDBKey, path, query;
+
+    rv = ExtractURIPathAndQuery(aPath, path, query);
+
+    if (rv == NS_OK) {
+      rv = key::GetKeyForPath(path.get(), aDBKey);
+      NS_ENSURE_SUCCESS(rv, rv);
+
+#ifdef _WIN32
+      path.ReplaceChar('\\', '/');
+      if (std::isalpha(path[0])) path.Insert('/', 0);
+#endif
+
+      uri = nsPrintfCString("file:%s.enc?%s&key=%s", path.get(), query.get(),
+                            aDBKey.get());
+    } else {
+      rv = key::GetKeyForPath(aPath, aDBKey);
+      NS_ENSURE_SUCCESS(rv, rv);
+
+      nsCString uriString;
+      uriString.AssignASCII(aPath);
+
+#ifdef _WIN32
+      uriString.ReplaceChar('\\', '/');
+      if (std::isalpha(uriString[0])) uriString.Insert('/', 0);
+#endif
+
+      uri =
+          nsPrintfCString("file:%s.enc?key=%s", uriString.get(), aDBKey.get());
+    }
+  } else {
+    uri = aPath;
+  }
+
+  nsCOMPtr<mozIStorageAsyncStatement> stmt;
+  rv = CreateAsyncStatement("ATTACH DATABASE :path AS "_ns + nsCString(aName),
+                            getter_AddRefs(stmt));
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  rv = stmt->BindUTF8StringByName("path"_ns, uri);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  nsCOMPtr<mozIStoragePendingStatement> pendingStatement;
+  rv = stmt->ExecuteAsync(aCallback, getter_AddRefs(pendingStatement));
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  pendingStatement.forget(_handle);
+
+  return NS_OK;
 }
 
 NS_IMETHODIMP
