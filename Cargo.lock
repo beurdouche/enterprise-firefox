@@ -2674,6 +2674,8 @@ dependencies = [
  "libz-rs-sys",
  "locale_service_glue",
  "localization-ffi",
+ "lockstore_ffi",
+ "lockstore_rs",
  "log",
  "mapped_hyph",
  "mdns_service",
@@ -4019,6 +4021,35 @@ checksum = "435011366fe56583b16cf956f9df0095b405b82d76425bc8981c0e22e60ec4df"
 dependencies = [
  "autocfg",
  "scopeguard",
+]
+
+[[package]]
+name = "lockstore_ffi"
+version = "0.1.0"
+dependencies = [
+ "lockstore_rs",
+ "log",
+ "nserror",
+ "nsstring",
+ "static_prefs",
+ "thin-vec",
+ "xpcom",
+]
+
+[[package]]
+name = "lockstore_rs"
+version = "0.1.0"
+dependencies = [
+ "base64 0.21.999",
+ "kvstore",
+ "nserror",
+ "nss-gk-api",
+ "nsstring",
+ "rusqlite 0.31.999",
+ "serde",
+ "serde_json",
+ "thiserror 1.999.999",
+ "xpcom",
 ]
 
 [[package]]

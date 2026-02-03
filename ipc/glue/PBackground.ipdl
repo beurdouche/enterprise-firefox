@@ -38,6 +38,7 @@ include protocol PCameras;
 include protocol PLockManager;
 include protocol PMIDIManager;
 include protocol PMIDIPort;
+include protocol PLockstore;
 include protocol PMLSTransaction;
 include protocol PQuota;
 include protocol PServiceWorker;
@@ -266,6 +267,8 @@ parent:
   async CreateMIDIPort(Endpoint<PMIDIPortParent> aEndpoint,
                        MIDIPortInfo portInfo, bool sysexEnabled);
   async HasMIDIDevice() returns (bool hasDevice);
+
+  async CreateLockstoreTransaction(Endpoint<PLockstoreParent> aEndpoint);
 
   async CreateMLSTransaction(Endpoint<PMLSTransactionParent> aEndpoint, nsIPrincipal aPrincipal);
 

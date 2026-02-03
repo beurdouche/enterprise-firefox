@@ -1,0 +1,50 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+include protocol PBackground;
+
+namespace mozilla {
+namespace security {
+namespace lockstore {
+
+struct RawBytes {
+  uint8_t[] data;
+};
+
+struct StringList {
+  nsCString[] items;
+};
+
+[ChildProc=anydom]
+async protocol PLockstore
+{
+parent:
+  // Keystore operations
+  async RequestKeystoreOpen(nsCString profilePath) returns (nsresult rv);
+  async RequestKeystoreCreateDek(nsCString collection, bool extractable)
+      returns (nsresult rv);
+  async RequestKeystoreGetDek(nsCString collection)
+      returns (nsresult rv, RawBytes? dek);
+  async RequestKeystoreDeleteDek(nsCString collection)
+      returns (nsresult rv, bool deleted);
+  async RequestKeystoreListCollections()
+      returns (nsresult rv, StringList collections);
+  async RequestKeystoreClose() returns (nsresult rv);
+
+  // Datastore operations
+  async RequestDatastoreOpen(nsCString collection) returns (nsresult rv);
+  async RequestDatastorePut(nsCString collection, nsCString entryName,
+      uint8_t[] data) returns (nsresult rv);
+  async RequestDatastoreGet(nsCString collection, nsCString entryName)
+      returns (nsresult rv, RawBytes? data);
+  async RequestDatastoreDelete(nsCString collection, nsCString entryName)
+      returns (nsresult rv, bool deleted);
+  async RequestDatastoreList(nsCString collection)
+      returns (nsresult rv, StringList entries);
+  async RequestDatastoreClose(nsCString collection) returns (nsresult rv);
+};
+
+}  // namespace lockstore
+}  // namespace security
+}  // namespace mozilla
