@@ -1891,7 +1891,15 @@ export var Policies = {
 
   EnterpriseStorageEncryption: {
     onBeforeUIStartup(manager, param) {
+      // Umbrella policy: turns on two distinct, independently-defined
+      // features under a single switch.
+      //   .enabled         -> primary password gating, read by
+      //                       LoginHelper.isEnterpriseManagedPrimaryPassword.
+      //   .sqlite.enabled  -> SQLite at-rest encryption, read by the
+      //                       storage layer (mozStorageService /
+      //                       SQLiteEncryption / Connection::initialize).
       setAndLockPref("security.storage.encryption.enabled", param);
+      setAndLockPref("security.storage.encryption.sqlite.enabled", param);
     },
   },
 
@@ -2841,10 +2849,11 @@ export var Policies = {
         "security.pki.certificate_transparency.disable_for_hosts",
         "security.pki.certificate_transparency.disable_for_spki_hashes",
         "security.pki.certificate_transparency.mode",
-        "security.storage.encryption.enabled",
         "security.ssl.enable_ocsp_stapling",
         "security.ssl.errorReporting.enabled",
         "security.ssl.require_safe_negotiation",
+        "security.storage.encryption.enabled",
+        "security.storage.encryption.sqlite.enabled",
         "security.tls.enable_0rtt_data",
         "security.tls.hello_downgrade_check",
         "security.tls.version.enable-deprecated",

@@ -816,7 +816,10 @@ const POLICIES_TESTS = [
 
   {
     policies: { EnterpriseStorageEncryption: true },
-    lockedPrefs: { "security.storage.encryption.enabled": true },
+    lockedPrefs: {
+      "security.storage.encryption.enabled": true,
+      "security.storage.encryption.sqlite.enabled": true,
+    },
   },
 
   // POLICY: PDFjs
