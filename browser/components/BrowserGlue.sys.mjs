@@ -1102,83 +1102,7 @@ BrowserGlue.prototype = {
             "security.storage.encryption.enabled",
             false
           ),
-        task: async () => {
-          // Get the primary secret from the console backend
-          // The API returns { data: "secret_value" }
-          let primarySecret;
-          try {
-            const payload = await lazy.ConsoleClient.getPrimarySecret();
-            primarySecret = payload.data;
-            if (!primarySecret) {
-              console.error(
-                "EnterpriseStorageEncryption.load: No data field in payload:",
-                payload
-              );
-              return;
-            }
-          } catch (e) {
-            console.error(
-              "EnterpriseStorageEncryption.load: Failed to get primary secret:",
-              e
-            );
-            return;
-          }
-
-          // Load the PK11 token
-          const tokenDB = Cc["@mozilla.org/security/pk11tokendb;1"].getService(
-            Ci.nsIPK11TokenDB
-          );
-
-          let pk11token;
-          try {
-            pk11token = tokenDB.getInternalKeyToken();
-          } catch (e) {
-            console.error(
-              "EnterpriseStorageEncryption.load: Error getting PK11 token: " + e
-            );
-            return;
-          }
-
-          // Check if the PK11 token needs initialization
-          if (pk11token.needsUserInit) {
-            try {
-              pk11token.initPassword(primarySecret);
-            } catch (e) {
-              console.error(
-                "EnterpriseStorageEncryption.load: Failed to initialize PK11 token password: " +
-                  e
-              );
-            }
-          } else if (!pk11token.needsLogin()) {
-            // Token doesn't need login (empty password), set it to primarySecret
-            try {
-              pk11token.changePassword("", primarySecret);
-            } catch (e) {
-              console.error(
-                "EnterpriseStorageEncryption.load: Failed to change password from empty to primarySecret: " +
-                  e
-              );
-            }
-          } else {
-            // Token needs login - verify the password matches primarySecret
-            let isPasswordValid;
-            try {
-              isPasswordValid = pk11token.checkPassword(primarySecret);
-            } catch (e) {
-              console.error(
-                "EnterpriseStorageEncryption.load: Error checking password against PK11 token: " +
-                  e
-              );
-              return;
-            }
-
-            if (!isPasswordValid) {
-              console.error(
-                "EnterpriseStorageEncryption.load: Password against the PK11 token is not valid"
-              );
-            }
-          }
-        },
+        task: () => this._runEnterpriseStorageEncryptionLoad(),
       },
     ];
 
@@ -1436,6 +1360,80 @@ BrowserGlue.prototype = {
     ];
 
     runIdleTasks(lateTasks);
+  },
+
+  async _runEnterpriseStorageEncryptionLoad() {
+    // Get the primary secret from the console backend
+    // The API returns { data: "secret_value" }
+    let primarySecret;
+    try {
+      const payload = await lazy.ConsoleClient.getPrimarySecret();
+      primarySecret = payload.data;
+      if (!primarySecret) {
+        console.error(
+          "EnterpriseStorageEncryption.load: No data field in payload:",
+          payload
+        );
+        return;
+      }
+    } catch (e) {
+      console.error(
+        "EnterpriseStorageEncryption.load: Failed to get primary secret:",
+        e
+      );
+      return;
+    }
+
+    // Get the internal key token directly
+    let pk11token;
+    try {
+      pk11token = Cc["@mozilla.org/security/internalkeytoken;1"].createInstance(
+        Ci.nsIPKCS11Token
+      );
+    } catch (e) {
+      console.error(
+        "EnterpriseStorageEncryption.load: Error getting PK11 token: " + e
+      );
+      return;
+    }
+
+    // The internal key token is unconditionally PK11_InitPin'd (with an
+    // empty password) by NSS startup in the parent process — see
+    // security/certverifier/NSSCertDBTrustDomain.cpp:1594-1603. By the time
+    // this task runs (and in any case the createInstance above forces NSS
+    // init synchronously), pk11token.needsUserInit is guaranteed to be
+    // false, so we only need to handle the two remaining states.
+    if (!pk11token.needsLogin()) {
+      // Token doesn't need login (empty password set by NSS init); set it
+      // to primarySecret.
+      try {
+        pk11token.changePassword("", primarySecret);
+      } catch (e) {
+        console.error(
+          "EnterpriseStorageEncryption.load: Failed to change password from empty to primarySecret: " +
+            e
+        );
+      }
+    } else {
+      // Token has a password (from a previous session) — verify it
+      // matches primarySecret.
+      let isPasswordValid;
+      try {
+        isPasswordValid = pk11token.checkPassword(primarySecret);
+      } catch (e) {
+        console.error(
+          "EnterpriseStorageEncryption.load: Error checking password against PK11 token: " +
+            e
+        );
+        return;
+      }
+
+      if (!isPasswordValid) {
+        console.error(
+          "EnterpriseStorageEncryption.load: Password against the PK11 token is not valid"
+        );
+      }
+    }
   },
 
   /**

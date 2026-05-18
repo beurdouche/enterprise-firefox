@@ -82,51 +82,53 @@ export var EnterprisePolicyTesting = {
     await settingsWritten;
   },
 
+  async _ensureMockServer(registerCleanupFunction) {
+    if (this._httpd !== undefined) {
+      return;
+    }
+    this._httpd = new lazy.HttpServer();
+    await this._httpd.start(-1);
+    const serverAddr = `http://localhost:${this._httpd.identity.primaryPort}`;
+
+    const expires_in = 3600;
+    const expires_at = Math.floor(Date.now() / 1000) + Number(expires_in);
+    const tokenData = {
+      access_token: "test_access_token",
+      refresh_token: "test_refresh_token",
+      expires_at,
+      token_type: "Bearer",
+    };
+
+    // Set up mock token endpoint for ConsoleClient (token refresh never hits it yet)
+    this._httpd.registerPathHandler("/sso/token", (req, resp) => {
+      resp.setStatusLine(req.httpVersion, 200, "OK");
+      resp.setHeader("Content-Type", "application/json");
+      resp.write(JSON.stringify(tokenData));
+    });
+
+    Services.prefs.setStringPref("enterprise.console.address", serverAddr);
+    Services.prefs.setBoolPref("browser.policies.live_polling.enabled", true);
+    Services.felt.setTokens(
+      tokenData.access_token,
+      tokenData.refresh_token,
+      tokenData.expires_at
+    );
+
+    registerCleanupFunction(async () => {
+      await new Promise(resolve => this._httpd.stop(resolve));
+      this._httpd = undefined;
+      Services.prefs.clearUserPref("enterprise.console.address");
+      Services.prefs.clearUserPref("browser.policies.live_polling.enabled");
+      Services.felt.clearTokens();
+    });
+  },
+
   servePolicyWithJson: async function servePolicyWithJson(
     json,
     customSchema,
     registerCleanupFunction
   ) {
-    if (this._httpd === undefined) {
-      this._httpd = new lazy.HttpServer();
-      await this._httpd.start(-1);
-      const serverAddr = `http://localhost:${this._httpd.identity.primaryPort}`;
-
-      const expires_in = 3600;
-      const expires_at = Math.floor(Date.now() / 1000) + Number(expires_in);
-      const tokenData = {
-        access_token: "test_access_token",
-        refresh_token: "test_refresh_token",
-        expires_at,
-        token_type: "Bearer",
-      };
-
-      // Set up mock token endpoint for ConsoleClient (token refresh never hits it yet)
-      this._httpd.registerPathHandler("/sso/token", (req, resp) => {
-        resp.setStatusLine(req.httpVersion, 200, "OK");
-        resp.setHeader("Content-Type", "application/json");
-        resp.write(JSON.stringify(tokenData));
-      });
-
-      Services.prefs.setStringPref("enterprise.console.address", serverAddr);
-      Services.prefs.setBoolPref("browser.policies.live_polling.enabled", true);
-      Services.felt.setTokens(
-        tokenData.access_token,
-        tokenData.refresh_token,
-        tokenData.expires_at
-      );
-
-      registerCleanupFunction(async () => {
-        await new Promise(resolve => this._httpd.stop(resolve));
-        this._httpd = undefined;
-        Services.prefs.clearUserPref("enterprise.console.address");
-        Services.prefs.clearUserPref("browser.policies.live_polling.enabled");
-        const { ConsoleClient } = ChromeUtils.importESModule(
-          "resource:///modules/enterprise/ConsoleClient.sys.mjs"
-        );
-        ConsoleClient.clearTokenData();
-      });
-    }
+    await this._ensureMockServer(registerCleanupFunction);
 
     let { promise, resolve } = Promise.withResolvers();
 
@@ -140,6 +142,24 @@ export var EnterprisePolicyTesting = {
     });
 
     return promise;
+  },
+
+  // Registers a mock handler for the enterprise console's primary-secret
+  // endpoint so tests can drive BrowserGlue._runEnterpriseStorageEncryptionLoad
+  // without contacting a real backend. The path is read from
+  // ConsoleClient._paths.KEY so the test follows the module if the route
+  // is renamed.
+  async registerPrimarySecret(secret, registerCleanupFunction) {
+    await this._ensureMockServer(registerCleanupFunction);
+    const { ConsoleClient } = ChromeUtils.importESModule(
+      "resource:///modules/enterprise/ConsoleClient.sys.mjs"
+    );
+    const keyPath = ConsoleClient._paths.KEY;
+    this._httpd.registerPathHandler(keyPath, (req, resp) => {
+      resp.setStatusLine(req.httpVersion, 200, "OK");
+      resp.setHeader("Content-Type", "application/json");
+      resp.write(JSON.stringify({ data: secret }));
+    });
   },
 
   checkPolicyPref(prefName, expectedValue, expectedLockedness) {
