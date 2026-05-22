@@ -7,12 +7,15 @@
 // that pre-unlocks the PK11 internal key token at startup using a secret
 // fetched from the enterprise console backend.
 //
-// This test exercises the end-to-end plumbing:
+// This test exercises the current end-to-end plumbing:
 //   - The named method exists and is callable from JS.
 //   - ConsoleClient.getPrimarySecret() can be driven by the mock
 //     EnterprisePolicyTesting backend (registerPrimarySecret helper).
-//   - The task's needsUserInit / !needsLogin / else branches each run
-//     without throwing back to the caller.
+//   - The task resolves without throwing to the caller during the
+//     first-run/empty-password flow.
+//   - When the token already has PRIMARY_SECRET set and is logged out,
+//     the existing-password/checkPassword path also runs without
+//     throwing back to the caller.
 //
 // What this test deliberately does NOT assert: that the task fully
 // unlocks the softoken in the empty-password (changePassword) branch.
