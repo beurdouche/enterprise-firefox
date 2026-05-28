@@ -1,0 +1,42 @@
+<?xml version="1.0"?>
+
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+
+<?csp default-src chrome:; img-src chrome: data:; style-src chrome:
+'unsafe-inline'; ?>
+
+<window
+  id="personalVaultRecoverySetupDialog"
+  type="child"
+  xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+  xmlns:html="http://www.w3.org/1999/xhtml"
+  title="Personal vault recovery phrase"
+>
+  <dialog id="personalVaultRecoverySetup" buttons="accept,cancel">
+    <linkset>
+      <html:link rel="stylesheet" href="chrome://global/skin/global.css" />
+    </linkset>
+    <script src="chrome://browser/content/preferences/personalVaultRecoverySetup.js" />
+
+    <vbox flex="1" style="min-width: 480px; padding: 1em;">
+      <description style="font-weight: bold;">
+        Write down these 24 words in order. You will need them to recover
+        your personal vault on any other device. Anyone with this phrase
+        can decrypt your personal-tier records.
+      </description>
+      <html:div id="mnemonicGrid"
+                style="display: grid; grid-template-columns: repeat(4, 1fr);
+                       gap: 0.5em; margin: 1em 0;
+                       font-family: monospace; font-size: 1.1em;">
+      </html:div>
+      <hbox>
+        <html:input type="checkbox" id="confirmSaved" />
+        <label for="confirmSaved">
+          I have saved this recovery phrase in a safe place.
+        </label>
+      </hbox>
+    </vbox>
+  </dialog>
+</window>

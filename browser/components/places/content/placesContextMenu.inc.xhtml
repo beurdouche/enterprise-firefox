@@ -178,4 +178,24 @@
             ignore-item="true"
             hidden="true"/>
 
+  <!-- Phase 2 Enterprise vault assign. places.js shows these for
+       link / link_bookmark / link_history nodes when vault routing
+       is enabled and the engine isn't policy-locked. -->
+  <menuseparator id="placesContext_vaultSeparator" hidden="true"/>
+  <menu id="placesContext_vaultMenu"
+        data-l10n-id="places-vault-menu"
+        hidden="true">
+    <menupopup>
+      <menuitem id="placesContext_vault:personal"
+                data-l10n-id="places-vault-personal"
+                type="radio"
+                name="placesVault"
+                command="placesCmd_vault:personal"/>
+      <menuitem id="placesContext_vault:enterprise"
+                data-l10n-id="places-vault-enterprise"
+                type="radio"
+                name="placesVault"
+                command="placesCmd_vault:enterprise"/>
+    </menupopup>
+  </menu>
 </menupopup>

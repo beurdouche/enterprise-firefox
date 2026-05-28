@@ -13,7 +13,7 @@ use xpcom::RefPtr;
 use log::trace;
 
 use crate::message::{nsICookieWrapper, FeltMessage, FELT_IPC_VERSION};
-use crate::utils::{self, Tokens, TOKENS};
+use crate::utils::{self, Tokens, SSO_PASSWORD, TOKENS};
 
 #[derive(Default)]
 pub struct FeltIpcClient {
@@ -389,6 +389,18 @@ impl FeltClientThread {
                                         utils::notify_observers("felt-firefox-access-token-refreshed".to_string());
                                     } else {
                                         trace!("FeltClientThread::felt_client::ipc_loop(): ERROR setting access token");
+                                    }
+                                }
+                                Ok(FeltMessage::SSOPassword(password)) => {
+                                    // Stash the password in the receiving Firefox's
+                                    // SSO_PASSWORD slot for BrowserGlue to consume.
+                                    // Do NOT trace the value.
+                                    if let Ok(mut g) = SSO_PASSWORD.write() {
+                                        *g = Some(password);
+                                        trace!("FeltClientThread::felt_client::ipc_loop(): SSOPassword received");
+                                        utils::notify_observers("felt-firefox-sso-password-received".to_string());
+                                    } else {
+                                        trace!("FeltClientThread::felt_client::ipc_loop(): ERROR storing SSO password");
                                     }
                                 }
                                 Ok(FeltMessage::Shutdown) => {

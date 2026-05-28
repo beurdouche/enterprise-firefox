@@ -1159,6 +1159,17 @@ eme-notifications-drm-content-playing-dismiss-accesskey = D
 panel-save-update-username = Username
 panel-save-update-password = Password
 
+# Phase 2 Enterprise vault routing. Duplicated from the toolkit
+# passwordmgr.ftl bundle because popup-notifications.inc.xhtml is
+# parsed in browser.xhtml's localization context, which doesn't
+# load the toolkit passwordmgr bundle.
+password-manager-save-in-personal-button =
+    .label = Save in Personal
+    .accesskey = P
+password-manager-save-in-enterprise-button =
+    .label = Save in Enterprise
+    .accesskey = E
+
 ##
 
 # "More" item in macOS share menu

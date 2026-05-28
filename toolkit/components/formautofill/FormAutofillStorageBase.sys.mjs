@@ -177,6 +177,11 @@ export const VALID_ADDRESS_FIELDS = [
   "country",
   "tel",
   "email",
+  // Phase 2 Enterprise vault tag. Listed so the merge loop in
+  // Storage.update() copies a new vault value onto the stored
+  // record when the user re-tags an existing entry. The sync
+  // payload already carries it via AutofillRecord's deferGetSet.
+  "vault",
 ];
 
 const VALID_ADDRESS_COMPUTED_FIELDS = [
@@ -195,6 +200,8 @@ export const VALID_CREDIT_CARD_FIELDS = [
   "cc-exp-month",
   "cc-exp-year",
   "cc-type",
+  // Phase 2 Enterprise vault tag. See VALID_ADDRESS_FIELDS.
+  "vault",
 ];
 
 const VALID_CREDIT_CARD_COMPUTED_FIELDS = [

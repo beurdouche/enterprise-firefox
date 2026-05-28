@@ -29,6 +29,11 @@ const SYNCABLE_LOGIN_FIELDS = [
   "password",
   "usernameField",
   "passwordField",
+  // Enterprise vault tag (Phase 2+). Sync routes records to the
+  // matching `passwords-personal` or `passwords-enterprise` collection
+  // based on this value, so a change in the tag must mark the record
+  // dirty for re-upload.
+  "vault",
 
   // `nsILoginMetaInfo` fields.
   "timeCreated",
@@ -216,6 +221,25 @@ export class LoginManagerStorage_json {
     this._store.saveSoon();
   }
 
+  /**
+   * Phase 2 Enterprise: record which vault the login was last
+   * successfully synced under. Engine-internal — does not bump
+   * syncCounter, does not fire `modifyLogin` notifications, and
+   * accepts only the three valid values ("personal", "enterprise",
+   * "").
+   */
+  async setVaultLastSynced(guid, value) {
+    if (value !== "personal" && value !== "enterprise" && value !== "") {
+      return;
+    }
+    this._store.ensureDataReady();
+    let login = this._store.data.logins.find(login => login.guid == guid);
+    if (login) {
+      login.vaultLastSynced = value;
+      this._store.saveSoon();
+    }
+  }
+
   // Returns false if the login has marked as deleted or doesn't exist.
   #loginIsDeleted(guid) {
     let login = this._store.data.logins.find(l => l.guid == guid);
@@ -303,6 +327,8 @@ export class LoginManagerStorage_json {
       syncCounter: loginClone.syncCounter,
       everSynced: loginClone.everSynced,
       encryptedUnknownFields: loginClone.unknownFields,
+      vault: loginClone.vault || "personal",
+      vaultLastSynced: loginClone.vaultLastSynced || "",
     });
     this._store.saveSoon();
 
@@ -509,6 +535,18 @@ export class LoginManagerStorage_json {
           newLogin.timeLastBreachAlertDismissed;
         loginItem.encryptedUnknownFields = encUnknownFields;
         loginItem.syncCounter = newLogin.syncCounter;
+        loginItem.vault = newLogin.vault || "personal";
+        // vaultLastSynced is engine-private metadata: preserve any
+        // value the engine explicitly set on `newLogin`; otherwise
+        // keep what the stored record already had so user-driven
+        // modifies don't clobber it.
+        if (
+          newLogin.vaultLastSynced === "personal" ||
+          newLogin.vaultLastSynced === "enterprise" ||
+          newLogin.vaultLastSynced === ""
+        ) {
+          loginItem.vaultLastSynced = newLogin.vaultLastSynced;
+        }
         this._store.saveSoon();
         break;
       }
@@ -593,6 +631,14 @@ export class LoginManagerStorage_json {
           newLogin.timeLastBreachAlertDismissed;
         loginItem.encryptedUnknownFields = encUnknownFields;
         loginItem.syncCounter = newLogin.syncCounter;
+        loginItem.vault = newLogin.vault || "personal";
+        if (
+          newLogin.vaultLastSynced === "personal" ||
+          newLogin.vaultLastSynced === "enterprise" ||
+          newLogin.vaultLastSynced === ""
+        ) {
+          loginItem.vaultLastSynced = newLogin.vaultLastSynced;
+        }
         this._store.saveSoon();
         break;
       }
@@ -840,6 +886,9 @@ export class LoginManagerStorage_json {
 
         // Any unknown fields along for the ride
         login.unknownFields = loginItem.encryptedUnknownFields;
+        // Vault tag (Phase 2+); legacy records default to "personal".
+        login.vault = loginItem.vault || "personal";
+        login.vaultLastSynced = loginItem.vaultLastSynced || "";
         foundLogins.push(login);
         foundIds.push(loginItem.id);
       }
@@ -940,6 +989,9 @@ export class LoginManagerStorage_json {
 
         // Any unknown fields along for the ride
         loginInfo.unknownFields = login.encryptedUnknownFields;
+        // Vault tag (Phase 2+); legacy records default to "personal".
+        loginInfo.vault = login.vault || "personal";
+        loginInfo.vaultLastSynced = login.vaultLastSynced || "";
 
         removedLogins.push(loginInfo);
         if (!fullyRemove && login?.everSynced) {

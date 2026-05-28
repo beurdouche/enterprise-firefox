@@ -406,6 +406,133 @@ impl Keystore {
         conn.save_metadata(collection_name, &metadata)
     }
 
+    /// Install caller-supplied raw KEK bytes as a `LocalKekRecord` at
+    /// the given kek_ref. Used by the personal-vault recovery flow on
+    /// a new device, after the caller has derived the bytes from a
+    /// BIP-39 mnemonic (PBKDF2 in JS) and verified them via the
+    /// recovery record's AES-GCM verifier.
+    ///
+    /// `kek_ref` must start with [`KEK_REF_LOCAL_PREFIX`]; a row at
+    /// any other shape is rejected. `kek_bytes` must match the wire
+    /// length of the default cipher suite (32 bytes for AES-256-GCM).
+    ///
+    /// Idempotent on matching bytes: re-importing the same bytes at
+    /// the same kek_ref is a no-op. Importing different bytes at an
+    /// existing kek_ref returns `InvalidConfiguration` — recovery on
+    /// a new device must reach byte-equality with the origin device.
+    pub fn import_local_kek(
+        &self,
+        kek_ref: &str,
+        kek_bytes: &[u8],
+    ) -> Result<(), LockstoreError> {
+        if !kek_ref.starts_with(crate::KEK_REF_LOCAL_PREFIX) {
+            return Err(LockstoreError::InvalidKekRef(kek_ref.to_string()));
+        }
+        let expected_len = DEFAULT_CIPHER_SUITE.key_size();
+        if kek_bytes.len() != expected_len {
+            return Err(LockstoreError::InvalidConfiguration(format!(
+                "Local KEK length {} does not match expected {} bytes",
+                kek_bytes.len(),
+                expected_len
+            )));
+        }
+        if let Some(existing) = self.load_local_record(kek_ref)? {
+            if existing.kek_bytes == kek_bytes {
+                return Ok(());
+            }
+            return Err(LockstoreError::InvalidConfiguration(format!(
+                "Local KEK already exists with different bytes at {}",
+                kek_ref
+            )));
+        }
+        let record = LocalKekRecord {
+            kek_bytes: kek_bytes.to_vec(),
+        };
+        self.save_local_record(kek_ref, &record)
+    }
+
+    /// Return the serialized `WrappedDek` entry for the
+    /// `(collection_name, kek_ref)` pair. Used by the personal-vault
+    /// recovery flow on the origin device to ship the wrapped DEK to
+    /// other devices via sync. The bytes are JSON-serialized; the
+    /// receiving side passes them straight to `import_wrapped_dek`
+    /// without inspecting them.
+    pub fn export_wrapped_dek(
+        &self,
+        collection_name: &str,
+        kek_ref: &str,
+    ) -> Result<Vec<u8>, LockstoreError> {
+        let conn = self.acquire_connection()?;
+        let metadata = conn.load_metadata(collection_name)?;
+        let entry = metadata
+            .wrapped_deks
+            .iter()
+            .find(|w| w.kek_ref == kek_ref)
+            .ok_or_else(|| {
+                LockstoreError::NotFound(format!(
+                    "No wrapped DEK for collection '{}' with kek_ref '{}'",
+                    collection_name, kek_ref
+                ))
+            })?;
+        Ok(serde_json::to_vec(entry)?)
+    }
+
+    /// Install a foreign `WrappedDek` (produced by
+    /// `export_wrapped_dek` on another device) into the
+    /// `collection_name` metadata. If the collection has no DEK
+    /// metadata yet, a fresh one is created using the default cipher
+    /// suite and `extractable = true`. If it has metadata already, a
+    /// `WrappedDek` for `kek_ref` is added (or refreshed if one was
+    /// already there).
+    ///
+    /// The deserialized record's `kek_ref` field must match the
+    /// `kek_ref` argument — otherwise we'd silently install bytes
+    /// keyed off a different ref than the caller asked for.
+    pub fn import_wrapped_dek(
+        &self,
+        collection_name: &str,
+        kek_ref: &str,
+        wrapped_dek_bytes: &[u8],
+    ) -> Result<(), LockstoreError> {
+        let kek_type = KekType::from_kek_ref(kek_ref)?;
+        let entry: WrappedDek = serde_json::from_slice(wrapped_dek_bytes)?;
+        if entry.kek_ref != kek_ref {
+            return Err(LockstoreError::InvalidConfiguration(format!(
+                "wrapped_dek.kek_ref '{}' does not match expected '{}'",
+                entry.kek_ref, kek_ref
+            )));
+        }
+        if entry.kek_type != kek_type {
+            return Err(LockstoreError::InvalidConfiguration(format!(
+                "wrapped_dek.kek_type {:?} does not match kek_ref kind {:?}",
+                entry.kek_type, kek_type
+            )));
+        }
+
+        let conn = self.acquire_connection()?;
+        let mut metadata = match conn.load_metadata(collection_name) {
+            Ok(m) => m,
+            Err(LockstoreError::NotFound(_)) => DekMetadata {
+                wrapped_deks: Vec::new(),
+                cipher_suite: DEFAULT_CIPHER_SUITE,
+                extractable: true,
+            },
+            Err(e) => return Err(e),
+        };
+
+        if let Some(existing) = metadata
+            .wrapped_deks
+            .iter_mut()
+            .find(|w| w.kek_ref == kek_ref)
+        {
+            existing.wrapped_dek = entry.wrapped_dek;
+        } else {
+            metadata.wrapped_deks.push(entry);
+        }
+
+        conn.save_metadata(collection_name, &metadata)
+    }
+
     pub(crate) fn get_dek_internal(
         &self,
         collection_name: &str,

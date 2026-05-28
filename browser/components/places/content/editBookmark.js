@@ -19,6 +19,7 @@ ChromeUtils.defineESModuleGetters(this, {
   PlacesTransactions: "resource://gre/modules/PlacesTransactions.sys.mjs",
   PlacesUIUtils: "moz-src:///browser/components/places/PlacesUIUtils.sys.mjs",
   PlacesUtils: "resource://gre/modules/PlacesUtils.sys.mjs",
+  VaultRouting: "resource://services-sync/VaultRouting.sys.mjs",
 });
 
 const STATIC_MENUITEM_COUNT = 7;
@@ -208,6 +209,31 @@ var gEditItemOverlay = {
       throw new Error("_initLocationField called unexpectedly");
     }
     this._initTextField(this._locationField, this._paneInfo.uri.spec);
+  },
+
+  _initVaultPicker() {
+    const menulist = this._element("vaultMenuList");
+    if (!menulist) {
+      return;
+    }
+    const guid = this.concreteGuid;
+    const current = guid
+      ? VaultRouting.getVault("bookmarks", guid)
+      : "personal";
+    menulist.value =
+      current === "personal" || current === "enterprise" ? current : "personal";
+    if (this._vaultPickerHandler) {
+      menulist.removeEventListener("command", this._vaultPickerHandler);
+    }
+    this._vaultPickerHandler = event => {
+      const targetGuid = this.concreteGuid;
+      if (!targetGuid) {
+        return;
+      }
+      VaultRouting.setVault("bookmarks", targetGuid, event.target.value);
+    };
+    /* eslint-disable mozilla/balanced-listeners */
+    menulist.addEventListener("command", this._vaultPickerHandler);
   },
 
   async _initKeywordField(newKeyword = "") {
@@ -405,6 +431,15 @@ var gEditItemOverlay = {
         if (instance != this._instance || this._paneInfo == null) {
           return;
         }
+      }
+
+      // Phase 2 Enterprise vault picker. Only shown for single-item
+      // bookmark edits (not bulk-tagging or folder edits) when vault
+      // routing is on.
+      const vaultVisible =
+        VaultRouting.isEnabled && isBookmark && !bulkTagging;
+      if (showOrCollapse("vaultRow", vaultVisible, "vault")) {
+        this._initVaultPicker();
       }
 
       // Selection count.

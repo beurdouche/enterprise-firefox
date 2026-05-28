@@ -344,6 +344,31 @@ nsresult LockstoreService::DoDeleteKek(const nsACString& aKekRef) {
   return keystore_delete_kek(mKeystore, &aKekRef);
 }
 
+nsresult LockstoreService::DoImportLocalKek(
+    const nsACString& aKekRef, const nsTArray<uint8_t>& aKekBytes) {
+  LOCKSTORE_SYNC_PREAMBLE;
+  return keystore_import_local_kek(
+      mKeystore, &aKekRef, aKekBytes.Elements(), aKekBytes.Length());
+}
+
+Result<nsTArray<uint8_t>, nsresult> LockstoreService::DoExportWrappedDek(
+    const nsACString& aCollection, const nsACString& aKekRef) {
+  LOCKSTORE_SYNC_PREAMBLE;
+  nsTArray<uint8_t> out;
+  MOZ_TRY(keystore_export_wrapped_dek(mKeystore, &aCollection, &aKekRef,
+                                      &out));
+  return out;
+}
+
+nsresult LockstoreService::DoImportWrappedDek(
+    const nsACString& aCollection, const nsACString& aKekRef,
+    const nsTArray<uint8_t>& aWrappedDekBytes) {
+  LOCKSTORE_SYNC_PREAMBLE;
+  return keystore_import_wrapped_dek(
+      mKeystore, &aCollection, &aKekRef, aWrappedDekBytes.Elements(),
+      aWrappedDekBytes.Length());
+}
+
 #undef LOCKSTORE_SYNC_PREAMBLE
 
 // ---------------------------------------------------------------------------
@@ -489,6 +514,35 @@ LockstoreService::DeleteKek(const nsACString& aKekRef, JSContext* aCx,
                             Promise** aPromise) {
   return ImplXpcomMethod(this, aCx, aPromise, &LockstoreService::DoDeleteKek,
                          nsCString{aKekRef});
+}
+
+NS_IMETHODIMP
+LockstoreService::ImportLocalKek(const nsACString& aKekRef,
+                                 const nsTArray<uint8_t>& aKekBytes,
+                                 JSContext* aCx, Promise** aPromise) {
+  return ImplXpcomMethod(this, aCx, aPromise,
+                         &LockstoreService::DoImportLocalKek,
+                         nsCString{aKekRef}, aKekBytes.Clone());
+}
+
+NS_IMETHODIMP
+LockstoreService::ExportWrappedDek(const nsACString& aCollection,
+                                   const nsACString& aKekRef, JSContext* aCx,
+                                   Promise** aPromise) {
+  return ImplXpcomMethod(this, aCx, aPromise,
+                         &LockstoreService::DoExportWrappedDek,
+                         nsCString{aCollection}, nsCString{aKekRef});
+}
+
+NS_IMETHODIMP
+LockstoreService::ImportWrappedDek(const nsACString& aCollection,
+                                   const nsACString& aKekRef,
+                                   const nsTArray<uint8_t>& aWrappedDekBytes,
+                                   JSContext* aCx, Promise** aPromise) {
+  return ImplXpcomMethod(this, aCx, aPromise,
+                         &LockstoreService::DoImportWrappedDek,
+                         nsCString{aCollection}, nsCString{aKekRef},
+                         aWrappedDekBytes.Clone());
 }
 
 }  // namespace mozilla::security::lockstore

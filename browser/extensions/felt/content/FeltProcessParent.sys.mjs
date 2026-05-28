@@ -775,10 +775,47 @@ export class FeltProcessParent extends JSProcessActorParent {
   }
 
   async receiveMessage(message) {
-    lazy.log.debug(
-      `FeltExtension: ParentProcess: Received message ${message.name} => ${message.data}`
-    );
+    // NB: deliberately do NOT %s-format message.data for the
+    // SSOPasswordCaptured case; it contains the user's password.
+    if (message.name === "FeltChild:SSOPasswordCaptured") {
+      lazy.log.debug("FeltExtension: ParentProcess: SSO password captured");
+    } else {
+      lazy.log.debug(
+        `FeltExtension: ParentProcess: Received message ${message.name} => ${message.data}`
+      );
+    }
     switch (message.name) {
+      case "FeltChild:SSOPasswordCaptured": {
+        // The raw password must never cross the actor-IPC boundary into
+        // the spawned browsing Firefox. Stretch it locally via PBKDF2
+        // (600k iters, SHA-256, 32 bytes), salted with the email +
+        // a fixed domain-separation tag, and only forward the derived
+        // hex string. The spawned Firefox's BrowserGlue then uses that
+        // derived material as the "captured password" input to its
+        // HKDF with the console-supplied primarySecret.
+        let rawPassword = message.data?.password ?? "";
+        let email = message.data?.email ?? "";
+        if (!rawPassword) {
+          break;
+        }
+        try {
+          const personalSecret = await this._stretchSSOPasswordLocally(
+            rawPassword,
+            email
+          );
+          Services.felt.setSSOPassword(personalSecret);
+        } catch (e) {
+          lazy.log.debug(
+            "FeltExtension: setSSOPassword/PBKDF2 unavailable: " + e
+          );
+        }
+        // Drop our local refs immediately. The Rust SSO_PASSWORD slot
+        // holds the stretched value; the raw password is no longer
+        // referenced.
+        rawPassword = null;
+        email = null;
+        break;
+      }
       case "FeltChild:StartFirefox":
         {
           const {
@@ -788,6 +825,20 @@ export class FeltProcessParent extends JSProcessActorParent {
           } = message.data;
           const expires_at = Math.floor(Date.now() / 1000) + Number(expires_in);
           Services.felt.setTokens(access_token, refresh_token, expires_at);
+
+          // Forward the SSO-captured password to the spawned Firefox via
+          // the existing Felt IPC channel. BrowserGlue in the spawned
+          // process consumes it via Services.felt.takeCapturedSSOPassword
+          // and mixes it with the primarySecret before unlocking NSS.
+          try {
+            Services.felt.sendSSOPassword();
+          } catch (e) {
+            // Don't fail the launch flow; the new code path may not be
+            // available on older Firefox subprocess builds.
+            lazy.log.debug(
+              "FeltExtension: ParentProcess: sendSSOPassword unavailable"
+            );
+          }
 
           // TODO: Bug 2003001 - Pass user info from Felt to Firefox to avoid network request on startup
           this.loggedInUserInfo =
@@ -833,6 +884,45 @@ export class FeltProcessParent extends JSProcessActorParent {
     }
     lazy.log.error(`FeltExtension: loggedInUserInfo not set`);
     return lazy.FeltCommon.ENTERPRISE_PROFILE;
+  }
+
+  /**
+   * PBKDF2-stretch the user's SSO password locally so the raw value
+   * never leaves the Felt UI process over IPC. The salt combines a
+   * fixed domain-separation tag with the user's email so two users
+   * with the same password produce different derived keys. Iteration
+   * count matches lockstore's PRP (800 k). Returns 64 hex chars
+   * (32 bytes).
+   *
+   * @param {string} password
+   * @param {string} email
+   * @returns {Promise<string>}
+   */
+  async _stretchSSOPasswordLocally(password, email) {
+    const encoder = new TextEncoder();
+    const keyMaterial = await globalThis.crypto.subtle.importKey(
+      "raw",
+      encoder.encode(password),
+      { name: "PBKDF2" },
+      false,
+      ["deriveBits"]
+    );
+    const bits = await globalThis.crypto.subtle.deriveBits(
+      {
+        name: "PBKDF2",
+        hash: "SHA-256",
+        salt: encoder.encode("enterprise-fxe-sso-pw-v1|" + email),
+        iterations: 800000,
+      },
+      keyMaterial,
+      256
+    );
+    const bytes = new Uint8Array(bits);
+    let hex = "";
+    for (let i = 0; i < bytes.length; i++) {
+      hex += bytes[i].toString(16).padStart(2, "0");
+    }
+    return hex;
   }
 }
 

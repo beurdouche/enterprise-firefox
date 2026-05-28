@@ -792,16 +792,25 @@ FxAccountsClient.prototype = {
     }
     let response;
     try {
+      // hawk.request signature: (path, method, credentials, payloadObj,
+      // extraHeaders, retryOK). In Enterprise mode the console issues a
+      // bearer token that authenticates this FxA call instead of the
+      // normal Hawk credentials. Pass it as extraHeaders. Pre-existing
+      // bug here was `...(MOZ_ENTERPRISE && {...})` -- object spread in
+      // a call-argument position requires an iterable, throws TypeError
+      // at runtime, broke every FxA call in Enterprise.
+      const extraHeaders =
+        AppConstants.MOZ_ENTERPRISE && Services.felt?.isFeltBrowser()
+          ? {
+              Authorization: `Bearer ${await lazy.ConsoleClient.getAccessToken()}`,
+            }
+          : undefined;
       response = await this.hawk.request(
         path,
         method,
         credentials,
         jsonPayload,
-        AppConstants.MOZ_ENTERPRISE && Services.felt?.isFeltBrowser()
-          ? {
-              Authorization: `Bearer ${await lazy.ConsoleClient.getAccessToken()}`,
-            }
-          : {}
+        extraHeaders
       );
     } catch (error) {
       log.error(`error ${method}ing ${path}`, error);

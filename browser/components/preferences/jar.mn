@@ -17,6 +17,10 @@ browser.jar:
    content/browser/preferences/moreFromMozilla.js
    content/browser/preferences/fxaPairDevice.xhtml
    content/browser/preferences/fxaPairDevice.js
+   content/browser/preferences/personalVaultRecoverySetup.xhtml
+   content/browser/preferences/personalVaultRecoverySetup.js
+   content/browser/preferences/personalVaultRecoveryRestore.xhtml
+   content/browser/preferences/personalVaultRecoveryRestore.js
    content/browser/preferences/findInPage.js
    content/browser/preferences/more-from-mozilla-qr-code-simple.svg
    content/browser/preferences/browser-layout-horizontal.svg

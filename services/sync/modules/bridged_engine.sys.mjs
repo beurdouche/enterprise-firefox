@@ -313,11 +313,43 @@ BridgedEngine.prototype = {
   },
 
   async _createRecord(id) {
+    // Phase 2 Enterprise: re-tag tombstones are records that moved
+    // out of the active vault since their last sync. Emit a deleted
+    // BSO in this collection so the stale server-side record is
+    // removed. The new-vault pass uploads the fresh record.
+    if (
+      this._vaultAwareViaTagStore &&
+      this._activeVault &&
+      this._classifyForActiveVault(id) === "tombstone"
+    ) {
+      return this._createTombstone(id);
+    }
     let change = this._modified.changes[id];
     if (!change) {
       throw new TypeError("Can't create record for unchanged item");
     }
-    return change.record;
+    const record = change.record;
+    // Stamp the vault tag onto the bridged payload so the receiver
+    // can route the record into its own VaultTagStore on apply.
+    // BridgedRecord.cleartext is a JSON string (the Rust bridge
+    // produced it); parse, inject, re-stringify.
+    if (this._vaultAwareViaTagStore && record && record.cleartext) {
+      const vault = this._vaultFor(id) || "personal";
+      if (typeof record.cleartext === "string") {
+        try {
+          const parsed = JSON.parse(record.cleartext);
+          parsed.vault = vault;
+          record.cleartext = JSON.stringify(parsed);
+        } catch (ex) {
+          this._log.warn(
+            `Failed to inject vault tag on bridged record ${id}: ${ex}`
+          );
+        }
+      } else if (typeof record.cleartext === "object") {
+        record.cleartext.vault = vault;
+      }
+    }
+    return record;
   },
 
   async _resetClient() {

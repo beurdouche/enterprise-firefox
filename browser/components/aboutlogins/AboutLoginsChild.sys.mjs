@@ -2,9 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
 import { LoginHelper } from "resource://gre/modules/LoginHelper.sys.mjs";
 
 import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
+
+const VAULT_ROUTING_PREF = "services.sync.vault.routing.enabled";
 
 const lazy = {};
 
@@ -139,6 +142,11 @@ export class AboutLoginsChild extends JSWindowActorChild {
       // Default to enabled just in case a search is attempted before we get a response.
       primaryPasswordEnabled: true,
       passwordRevealVisible: true,
+      // Phase 2 Enterprise vault routing. When true, login-item.mjs
+      // surfaces the vault chip + edit-form selector.
+      vaultRoutingEnabled:
+        AppConstants.MOZ_ENTERPRISE &&
+        Services.prefs.getBoolPref(VAULT_ROUTING_PREF, false),
     };
     waivedContent.AboutLoginsUtils = Cu.cloneInto(
       AboutLoginsUtils,

@@ -281,6 +281,7 @@
                 <span class="login-item-title"></span>
                 <span class="new-login-title" data-l10n-id="about-logins-login-item-new-login-title"></span>
               </h2>
+              <span class="login-item-vault-chip" hidden></span>
               <div class="action-buttons">
                 <edit-button></edit-button>
                 <moz-button-group class="form-actions-row">
@@ -343,6 +344,16 @@
                   </label>
                   <copy-password-button class="copy-button"></copy-password-button>
                 </div>
+              </div>
+              <div class="detail-row login-item-vault-row" hidden>
+                <label class="detail-cell">
+                  <span class="vault-label field-label" data-l10n-id="about-logins-login-item-vault-label"></span>
+                  <select name="vault" class="login-item-vault-select">
+                    <option value="" data-l10n-id="about-logins-login-item-vault-option-choose"></option>
+                    <option value="personal" data-l10n-id="about-logins-login-item-vault-option-personal"></option>
+                    <option value="enterprise" data-l10n-id="about-logins-login-item-vault-option-enterprise"></option>
+                  </select>
+                </label>
               </div>
               <login-timeline hidden ></login-timeline>
           </form>

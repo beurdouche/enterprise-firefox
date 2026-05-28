@@ -312,6 +312,15 @@ BookmarksEngine.prototype = {
   syncPriority: 4,
   allowSkippedRecord: false,
 
+  // Phase 2 Enterprise vault routing. Bookmarks' local storage lives
+  // in Rust (places.sqlite via PlacesSyncUtils.bookmarks), so per-
+  // record vault tags ride alongside the bridge in a JS-side tag
+  // store (`Service.vaultTagStore`). The base SyncEngine consults
+  // it via the helpers in engines.sys.mjs. The two-pass loop runs
+  // through the existing engine `_sync` override below (which wraps
+  // super._sync with maintenance handling).
+  _vaultAwareViaTagStore: true,
+
   async _ensureCurrentSyncID(newSyncID) {
     await lazy.PlacesSyncUtils.bookmarks.ensureCurrentSyncId(newSyncID);
     let buf = await this._store.ensureOpenMirror();
@@ -400,8 +409,12 @@ BookmarksEngine.prototype = {
   },
 
   async _sync() {
+    return SyncEngine.runVaultLoop(this, () => this._syncOnce());
+  },
+
+  async _syncOnce() {
     try {
-      await super._sync();
+      await SyncEngine.prototype._sync.call(this);
       if (this._ranMaintenanceOnLastSync) {
         // If the last sync failed, we ran maintenance, and this sync succeeded,
         // maintenance likely fixed the issue.

@@ -53,3 +53,12 @@ bookmark-overlay-keyword-2 =
 bookmark-overlay-tags-caption-label = Use tags to organize and search for bookmarks from the address bar
 
 bookmark-overlay-keyword-caption-label-2 = Use a single keyword to open bookmarks directly from the address bar
+
+# Phase 2 Enterprise vault picker on the edit-bookmark panel.
+bookmark-overlay-vault =
+  .value = Vault
+  .accesskey = V
+bookmark-overlay-vault-personal =
+  .label = Personal
+bookmark-overlay-vault-enterprise =
+  .label = Enterprise

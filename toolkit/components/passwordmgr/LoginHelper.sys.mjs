@@ -876,6 +876,22 @@ export const LoginHelper = {
         aNewLoginData.passwordField
       );
       newLogin.unknownFields = aNewLoginData.unknownFields;
+      // Phase 2 Enterprise vault metadata isn't part of init();
+      // copy it explicitly so user-driven re-tags (about:logins
+      // vault selector, save doorhanger buttons) actually persist.
+      if (
+        aNewLoginData.vault === "personal" ||
+        aNewLoginData.vault === "enterprise"
+      ) {
+        newLogin.vault = aNewLoginData.vault;
+      }
+      if (
+        aNewLoginData.vaultLastSynced === "personal" ||
+        aNewLoginData.vaultLastSynced === "enterprise" ||
+        aNewLoginData.vaultLastSynced === ""
+      ) {
+        newLogin.vaultLastSynced = aNewLoginData.vaultLastSynced;
+      }
       newLogin.QueryInterface(Ci.nsILoginMetaInfo);
 
       // Automatically update metainfo when password is changed.
@@ -908,6 +924,9 @@ export const LoginHelper = {
           case "usernameField":
           case "passwordField":
           case "unknownFields":
+          // Phase 2 Enterprise vault tags (fall through)
+          case "vault":
+          case "vaultLastSynced":
           // nsILoginMetaInfo (fall through)
           case "guid":
           case "timeCreated":

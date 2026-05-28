@@ -34,6 +34,8 @@ EXTRA_JS_MODULES["services-sync"] += [
     "modules/telemetry.sys.mjs",
     "modules/UIState.sys.mjs",
     "modules/util.sys.mjs",
+    "modules/vault_tag_store.sys.mjs",
+    "modules/VaultRouting.sys.mjs",
     "Weave.sys.mjs",
 ]
 
@@ -42,6 +44,7 @@ EXTRA_JS_MODULES["services-sync"].engines += [
     "modules/engines/clients.sys.mjs",
     "modules/engines/extension-storage.sys.mjs",
     "modules/engines/passwords.sys.mjs",
+    "modules/engines/personal_vault_recovery.sys.mjs",
     "modules/engines/prefs.sys.mjs",
 ]
 

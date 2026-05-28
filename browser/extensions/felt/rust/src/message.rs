@@ -55,6 +55,12 @@ pub enum FeltMessage {
     IntPreference((String, i32)),
     StartupReady,
     AccessToken((String, i64)),
+    /// The user's SSO password, captured by FeltWindowChild on the SSO
+    /// login page and shipped from the Felt UI process to the spawned
+    /// browsing Firefox so its BrowserGlue can mix it with the
+    /// console-supplied primarySecret before setting the NSS slot
+    /// password.
+    SSOPassword(String),
     RefreshTokens,
     ExtensionReady,
     OpenURL((String, i32, Option<FocusHint>)),
@@ -72,4 +78,4 @@ pub enum FocusHint {
     Timestamp(u32),
 }
 
-pub const FELT_IPC_VERSION: u32 = 9;
+pub const FELT_IPC_VERSION: u32 = 10;

@@ -144,6 +144,15 @@ places-manage-bookmarks =
   .label = Manage Bookmarks
   .accesskey = M
 
+# Phase 2 Enterprise vault submenu in the places context menu.
+places-vault-menu =
+  .label = Sync vault
+  .accesskey = V
+places-vault-personal =
+  .label = Personal
+places-vault-enterprise =
+  .label = Enterprise
+
 places-library3 =
   .title = Library
 

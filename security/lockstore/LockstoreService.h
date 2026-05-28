@@ -82,6 +82,13 @@ class LockstoreService final : public nsILockstore, public nsIObserver {
                                           const nsACString& aSecret,
                                           uint32_t aCacheTimeoutMs);
   nsresult DoDeleteKek(const nsACString& aKekRef);
+  nsresult DoImportLocalKek(const nsACString& aKekRef,
+                            const nsTArray<uint8_t>& aKekBytes);
+  Result<nsTArray<uint8_t>, nsresult> DoExportWrappedDek(
+      const nsACString& aCollection, const nsACString& aKekRef);
+  nsresult DoImportWrappedDek(const nsACString& aCollection,
+                              const nsACString& aKekRef,
+                              const nsTArray<uint8_t>& aWrappedDekBytes);
 
  private:
   ~LockstoreService();

@@ -1,0 +1,38 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+#include "nsISupports.idl"
+
+/**
+ * Synchronous, stateless BIP-39 helper used by the personal-vault
+ * recovery flow (see services/fxaccounts/FxAccountsKeys.sys.mjs).
+ *
+ * Both methods are pure CPU and return in microseconds, so they
+ * do not need the Promise/background-thread machinery that
+ * `nsILockstore` uses for SQLite + PBKDF2 work.
+ *
+ * Entropy for `generate` is drawn from NSS via lockstore's own
+ * `generate_random_bytes`, not from a Rust `rand` source, so every
+ * piece of randomness in the recovery path traces back to NSS.
+ */
+[scriptable, uuid(8d2c4e91-7a6b-4f5e-90c3-1b5a8d2e7c0a)]
+interface nsIBip39 : nsISupports
+{
+  /// Generate a fresh BIP-39 mnemonic in English with the given
+  /// word count. Valid counts are 12, 15, 18, 21, and 24; any
+  /// other value throws NS_ERROR_INVALID_ARG. The personal-vault
+  /// recovery flow uses 24 (256-bit entropy).
+  AUTF8String generate(in uint32_t wordCount);
+
+  /// Validate a BIP-39 mnemonic phrase. Checks NFKD normalization,
+  /// English wordlist membership, and the BIP-39 checksum in one
+  /// shot. Throws NS_ERROR_INVALID_ARG on any failure; callers
+  /// must not distinguish reasons in the UI (to avoid leaking
+  /// which step of validation a typo hit).
+  void validate(in AUTF8String phrase);
+};
+
+%{C++
+#define NS_BIP39_CONTRACTID "@mozilla.org/security/bip39;1"
+%}

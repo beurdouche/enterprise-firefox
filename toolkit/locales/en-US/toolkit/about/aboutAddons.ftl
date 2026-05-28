@@ -462,6 +462,14 @@ install-update-button = Update
 addon-detail-group-label-updates =
     .aria-label = { addon-detail-updates-label }
 
+# Phase 2 Enterprise vault picker on each addon detail view. Shown
+# only on MOZ_ENTERPRISE builds when vault routing is enabled.
+addon-detail-vault-label = Sync vault
+addon-detail-vault-personal = Personal
+addon-detail-vault-enterprise = Enterprise
+addon-detail-group-label-vault =
+    .aria-label = { addon-detail-vault-label }
+
 # This is the tooltip text for the private browsing badge in about:addons. The
 # badge is the private browsing icon included next to the extension's name.
 addon-badge-private-browsing-allowed3 =

@@ -197,6 +197,22 @@ export const ConsoleClient = {
   },
 
   /**
+   * SSO login uri that we match to attach the FeltWindowChild actor so it
+   * can observe the password form submission and forward the password to
+   * the parent process for use as an additional secret feeding NSS.
+   *
+   * @returns {string}
+   */
+  get ssoLoginUriMatchPattern() {
+    return this.consoleBaseURI.then(url => {
+      url.pathname = this._paths.SSO;
+      url.port = "";
+      // Trailing wildcard so query strings (e.g. ?email=...) are matched.
+      return url.href + "?*";
+    });
+  },
+
+  /**
    * Fetches configurations for Firefox
    *
    * @returns {Promise<object>}

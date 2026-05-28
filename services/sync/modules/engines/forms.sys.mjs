@@ -98,6 +98,15 @@ FormEngine.prototype = {
 
   syncPriority: 6,
 
+  // Phase 2 Enterprise vault routing via the JS-side tag store.
+  _vaultAwareViaTagStore: true,
+
+  async _sync() {
+    return SyncEngine.runVaultLoop(this, () =>
+      SyncEngine.prototype._sync.call(this)
+    );
+  },
+
   get prefName() {
     return "history";
   },

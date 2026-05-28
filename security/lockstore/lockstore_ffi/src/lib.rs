@@ -165,6 +165,96 @@ pub unsafe extern "C" fn keystore_import_dek(
     }
 }
 
+/// Install caller-supplied raw KEK bytes as a local KEK at the given
+/// `kek_ref`. See `Keystore::import_local_kek` for semantics.
+///
+/// # Safety
+/// `kek_ptr` must point to at least `kek_len` initialised bytes that
+/// remain valid for the duration of the call. `kek_len` must equal the
+/// wire length of the default cipher suite (32 bytes for AES-256-GCM).
+#[no_mangle]
+pub unsafe extern "C" fn keystore_import_local_kek(
+    handle: &KeystoreHandle,
+    kek_ref: &nsACString,
+    kek_ptr: *const u8,
+    kek_len: usize,
+) -> nsresult {
+    if kek_ref.is_empty() {
+        return NS_ERROR_INVALID_ARG;
+    }
+    if kek_len == 0 || kek_ptr.is_null() {
+        return NS_ERROR_INVALID_ARG;
+    }
+    let kek_ref_str = kek_ref.to_utf8();
+    // SAFETY: non-zero len + non-null ptr validated above; caller's
+    // contract requires `kek_len` valid bytes at `kek_ptr`.
+    let bytes = unsafe { std::slice::from_raw_parts(kek_ptr, kek_len) };
+    match handle.keystore.import_local_kek(&kek_ref_str, bytes) {
+        Ok(()) => NS_OK,
+        Err(e) => error_to_nsresult(e),
+    }
+}
+
+/// Return the serialized `WrappedDek` bytes for the
+/// `(collection, kek_ref)` pair. See `Keystore::export_wrapped_dek`.
+#[no_mangle]
+pub extern "C" fn keystore_export_wrapped_dek(
+    handle: &KeystoreHandle,
+    collection: &nsACString,
+    kek_ref: &nsACString,
+    ret_bytes: &mut ThinVec<u8>,
+) -> nsresult {
+    if collection.is_empty() || kek_ref.is_empty() {
+        return NS_ERROR_INVALID_ARG;
+    }
+    let coll_str = collection.to_utf8();
+    let kek_ref_str = kek_ref.to_utf8();
+    match handle
+        .keystore
+        .export_wrapped_dek(&coll_str, &kek_ref_str)
+    {
+        Ok(bytes) => {
+            *ret_bytes = bytes.into_iter().collect();
+            NS_OK
+        }
+        Err(e) => error_to_nsresult(e),
+    }
+}
+
+/// Install a foreign `WrappedDek` record into the collection's DEK
+/// metadata. See `Keystore::import_wrapped_dek` for semantics.
+///
+/// # Safety
+/// `bytes_ptr` must point to at least `bytes_len` initialised bytes
+/// that remain valid for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn keystore_import_wrapped_dek(
+    handle: &KeystoreHandle,
+    collection: &nsACString,
+    kek_ref: &nsACString,
+    bytes_ptr: *const u8,
+    bytes_len: usize,
+) -> nsresult {
+    if collection.is_empty() || kek_ref.is_empty() {
+        return NS_ERROR_INVALID_ARG;
+    }
+    if bytes_len == 0 || bytes_ptr.is_null() {
+        return NS_ERROR_INVALID_ARG;
+    }
+    let coll_str = collection.to_utf8();
+    let kek_ref_str = kek_ref.to_utf8();
+    // SAFETY: non-zero len + non-null ptr validated above; caller's
+    // contract requires `bytes_len` valid bytes at `bytes_ptr`.
+    let bytes = unsafe { std::slice::from_raw_parts(bytes_ptr, bytes_len) };
+    match handle
+        .keystore
+        .import_wrapped_dek(&coll_str, &kek_ref_str, bytes)
+    {
+        Ok(()) => NS_OK,
+        Err(e) => error_to_nsresult(e),
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn keystore_is_dek_extractable(
     handle: &KeystoreHandle,
@@ -711,4 +801,49 @@ pub unsafe extern "C" fn lockstore_datastore_close(handle: *mut LockstoreDatasto
     // `Box::into_raw` pointer.
     unsafe { Box::from_raw(handle).close() };
     NS_OK
+}
+
+// ============================================================================
+// BIP-39 FFI Functions
+// ============================================================================
+
+/// Generate a new BIP-39 mnemonic phrase in English with the given
+/// word count. `word_count` must be 12, 15, 18, 21, or 24 (per
+/// BIP-39 §3). Entropy is drawn from NSS via lockstore's own
+/// `generate_random_bytes`, not from `rand`, so that all randomness
+/// in the recovery path traces back to NSS.
+#[no_mangle]
+pub extern "C" fn lockstore_bip39_generate(
+    word_count: u32,
+    ret_phrase: &mut nsCString,
+) -> nsresult {
+    let wc = word_count as usize;
+    if !matches!(wc, 12 | 15 | 18 | 21 | 24) {
+        return NS_ERROR_INVALID_ARG;
+    }
+    let entropy_bytes = wc * 4 / 3;
+    let mut entropy = lockstore_rs::crypto::generate_random_bytes(entropy_bytes);
+    let result = bip39::Mnemonic::from_entropy_in(bip39::Language::English, &entropy);
+    entropy.zeroize();
+    match result {
+        Ok(mnemonic) => {
+            ret_phrase.assign(&mnemonic.to_string());
+            NS_OK
+        }
+        Err(_) => NS_ERROR_FAILURE,
+    }
+}
+
+/// Validate a BIP-39 mnemonic phrase: checks NFKD normalization,
+/// wordlist membership against the English list, and checksum.
+/// Returns `NS_OK` on success, `NS_ERROR_INVALID_ARG` on any
+/// failure (we do not distinguish reasons at the FFI boundary so
+/// the caller cannot leak which step a typo hit).
+#[no_mangle]
+pub extern "C" fn lockstore_bip39_validate(phrase: &nsACString) -> nsresult {
+    let s = phrase.to_utf8();
+    match bip39::Mnemonic::parse_in_normalized(bip39::Language::English, &s) {
+        Ok(_) => NS_OK,
+        Err(_) => NS_ERROR_INVALID_ARG,
+    }
 }

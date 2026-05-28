@@ -22,7 +22,7 @@ use log::{error, trace};
 use crate::message::{FeltMessage, FELT_IPC_VERSION};
 #[cfg(target_os = "linux")]
 use crate::utils;
-use crate::utils::{Tokens, CONSOLE_URL, TOKENS, TOKEN_EXPIRY_SKEW};
+use crate::utils::{Tokens, CONSOLE_URL, SSO_PASSWORD, TOKENS, TOKEN_EXPIRY_SKEW};
 
 #[xpcom(implement(nsIFelt), atomic)]
 pub struct FeltXPCOM {
@@ -238,6 +238,70 @@ impl FeltXPCOM {
     fn ClearTokens(&self) -> nserror::nsresult {
         trace!("FeltXPCOM::ClearTokens(): clearing");
         self.set_tokens_impl("".to_string(), "".to_string(), 0)
+    }
+
+    // Store the SSO password captured by FeltWindowChild on the SSO
+    // login page. In-memory only; never logged.
+    fn SetSSOPassword(&self, password: *const nsACString) -> nserror::nsresult {
+        let password_s = unsafe { (*password).to_string() };
+        trace!("FeltXPCOM::SetSSOPassword(): storing (len={})", password_s.len());
+        match SSO_PASSWORD.write() {
+            Ok(mut g) => {
+                *g = Some(password_s);
+                NS_OK
+            }
+            Err(_) => NS_ERROR_FAILURE,
+        }
+    }
+
+    // Push the captured password to the spawned Firefox over the
+    // existing Felt IPC channel. Mirrors SendAccessToken.
+    fn SendSSOPassword(&self) -> nserror::nsresult {
+        if self.is_felt_browser {
+            trace!("FeltXPCOM::SendSSOPassword: called from the browser, no-op");
+            return NS_OK;
+        }
+        match SSO_PASSWORD.read() {
+            Ok(g) => match g.as_ref() {
+                Some(p) => self.send(FeltMessage::SSOPassword(p.clone())),
+                None => {
+                    trace!("FeltXPCOM::SendSSOPassword: no password set");
+                    NS_OK
+                }
+            },
+            Err(_) => NS_ERROR_FAILURE,
+        }
+    }
+
+    // In the spawned Firefox: read the captured stretched-password
+    // derivative without consuming it. Non-destructive so multiple
+    // readers (BrowserGlue for NSS-slot mix, FxAccountsKeys for
+    // kSyncPersonal derivation) can hit this every time they need it.
+    // The slot is zeroed only on explicit logout via
+    // ClearCapturedSSOPassword.
+    fn PeekCapturedSSOPassword(
+        &self,
+        password: *mut nsACString,
+    ) -> nserror::nsresult {
+        match SSO_PASSWORD.read() {
+            Ok(g) => {
+                let pw = g.as_deref().unwrap_or("");
+                unsafe { (*password).assign(pw) };
+                NS_OK
+            }
+            Err(_) => NS_ERROR_FAILURE,
+        }
+    }
+
+    // Zero the captured stretched-password slot. Call on logout.
+    fn ClearCapturedSSOPassword(&self) -> nserror::nsresult {
+        match SSO_PASSWORD.write() {
+            Ok(mut g) => {
+                *g = None;
+                NS_OK
+            }
+            Err(_) => NS_ERROR_FAILURE,
+        }
     }
 
     fn RefreshTokens(&self) -> nserror::nsresult {

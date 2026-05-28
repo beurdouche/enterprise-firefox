@@ -3,6 +3,7 @@
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
+import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
 import { Log } from "resource://gre/modules/Log.sys.mjs";
 
 import { Async } from "resource://services-common/async.sys.mjs";
@@ -25,6 +26,8 @@ const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
   BulkKeyBundle: "resource://services-sync/keys.sys.mjs",
   Weave: "resource://services-sync/main.sys.mjs",
+  setTimeout: "resource://gre/modules/Timer.sys.mjs",
+  clearTimeout: "resource://gre/modules/Timer.sys.mjs",
 });
 
 ChromeUtils.defineLazyGetter(lazy, "fxAccounts", () => {
@@ -99,6 +102,18 @@ export function SyncAuthManager() {
   for (let topic of OBSERVER_TOPICS) {
     Services.obs.addObserver(this.asyncObserver, topic);
   }
+  // Phase 2 Enterprise: invalidate the cached personal sync key
+  // bundle when the Felt extension delivers the stretched SSO
+  // password over IPC. This handles the case where the bundle was
+  // first derived under the device-local fallback secret and the
+  // SSO password arrived afterward — the next sync rebuilds the
+  // bundle with the SSO-password salt (cross-device path).
+  if (AppConstants.MOZ_ENTERPRISE) {
+    Services.obs.addObserver(
+      this.asyncObserver,
+      "felt-firefox-sso-password-received"
+    );
+  }
 }
 
 SyncAuthManager.prototype = {
@@ -136,6 +151,14 @@ SyncAuthManager.prototype = {
     // After this is called, we can expect Service.identity != this.
     for (let topic of OBSERVER_TOPICS) {
       Services.obs.removeObserver(this.asyncObserver, topic);
+    }
+    if (AppConstants.MOZ_ENTERPRISE) {
+      try {
+        Services.obs.removeObserver(
+          this.asyncObserver,
+          "felt-firefox-sso-password-received"
+        );
+      } catch (e) {}
     }
     this.resetCredentials();
     this._userUid = null;
@@ -204,12 +227,20 @@ SyncAuthManager.prototype = {
         // There's no need to wait for sync to complete and it would deadlock
         // our AsyncObserver.
         if (!Svc.PrefBranch.getBoolPref("testing.tps", false)) {
-          lazy.Weave.Service.sync({ why: "login" });
+          this._kickOffSyncWhenSSOReady().catch(err => {
+            this._log.warn("kickOffSyncWhenSSOReady failed", err);
+          });
         }
         break;
       }
 
       case fxAccountsCommon.ONLOGOUT_NOTIFICATION:
+        // Defensive: FxAccounts.signOut already calls this. Repeat
+        // here so any code path that emits ONLOGOUT without going
+        // through signOut also zeroes the captured SSO password.
+        try {
+          Services.felt?.clearCapturedSSOPassword?.();
+        } catch (e) {}
         lazy.Weave.Service.startOver()
           .then(() => {
             this._log.trace("startOver completed");
@@ -225,7 +256,85 @@ SyncAuthManager.prototype = {
         // throw away token forcing us to fetch a new one later.
         this.resetCredentials();
         break;
+
+      case "felt-firefox-sso-password-received":
+        // The Felt IPC just delivered the stretched SSO password.
+        // Drop the cached personal sync bundle (if it was built
+        // under the device-local fallback) so the next sync rebuilds
+        // it with the SSO-password salt.
+        this._personalSyncKeyBundle = null;
+        break;
     }
+  },
+
+  /**
+   * Phase 2 Enterprise: gate the first post-verification sync on the
+   * Felt SSO password arrival. If the password is already present in
+   * the spawned Firefox's Felt slot, sync immediately. If not, wait
+   * up to `services.sync.enterprise.ssoPasswordWaitMs` for the
+   * `felt-firefox-sso-password-received` observer notification.
+   * On timeout, sync anyway — the lockstore-local fallback in
+   * FxAccountsKeys._deriveSyncKeyPersonal ensures we still derive a
+   * non-admin-recoverable key.
+   *
+   * Non-MOZ_ENTERPRISE builds skip the wait entirely.
+   */
+  async _kickOffSyncWhenSSOReady() {
+    if (!AppConstants.MOZ_ENTERPRISE) {
+      lazy.Weave.Service.sync({ why: "login" });
+      return;
+    }
+    const present =
+      (Services.felt &&
+        typeof Services.felt.peekCapturedSSOPassword === "function" &&
+        Services.felt.peekCapturedSSOPassword() !== "") ||
+      false;
+    if (present) {
+      lazy.Weave.Service.sync({ why: "login" });
+      return;
+    }
+    const timeoutMs = Services.prefs.getIntPref(
+      "services.sync.enterprise.ssoPasswordWaitMs",
+      30000
+    );
+    this._log.info(
+      `Waiting up to ${timeoutMs}ms for felt-firefox-sso-password-received`
+    );
+    await new Promise(resolve => {
+      const topic = "felt-firefox-sso-password-received";
+      let timer = null;
+      const obs = () => {
+        Services.obs.removeObserver(obs, topic);
+        if (timer) {
+          lazy.clearTimeout(timer);
+        }
+        resolve();
+      };
+      Services.obs.addObserver(obs, topic);
+      // Re-check in case the slot got populated between the first
+      // peek and the addObserver call.
+      try {
+        if (
+          Services.felt &&
+          typeof Services.felt.peekCapturedSSOPassword === "function" &&
+          Services.felt.peekCapturedSSOPassword() !== ""
+        ) {
+          Services.obs.removeObserver(obs, topic);
+          resolve();
+          return;
+        }
+      } catch (e) {}
+      timer = lazy.setTimeout(() => {
+        try {
+          Services.obs.removeObserver(obs, topic);
+        } catch (e) {}
+        this._log.warn(
+          "Timed out waiting for SSO password; using local fallback secret"
+        );
+        resolve();
+      }, timeoutMs);
+    });
+    lazy.Weave.Service.sync({ why: "login" });
   },
 
   /**
@@ -239,8 +348,29 @@ SyncAuthManager.prototype = {
     return this._fxaService._internal.localtimeOffsetMsec;
   },
 
+  // Personal-tier sync key bundle. In MOZ_ENTERPRISE this is the
+  // kSyncPersonal-derived bundle (FxAccountsKeys._deriveSyncKeyPersonal).
+  // In consumer builds it's the standard kSync.
+  get personalSyncKeyBundle() {
+    return this._personalSyncKeyBundle;
+  },
+
+  // Phase 2 Enterprise-tier sync key bundle (kSyncEnterprise-derived).
+  // Null in non-Enterprise builds or before the FxA scoped-key flow
+  // has populated it. Used to decrypt the `crypto/keys-enterprise` BSO.
+  get enterpriseSyncKeyBundle() {
+    return this._enterpriseSyncKeyBundle;
+  },
+
+  /**
+   * @deprecated Pre-Phase-2 alias. Use `personalSyncKeyBundle` for the
+   * personal-tier bundle (which is what this used to mean in Phase 1
+   * Enterprise) or `enterpriseSyncKeyBundle` for the enterprise-tier
+   * bundle. Kept temporarily for external callers; remove once all
+   * call sites are migrated.
+   */
   get syncKeyBundle() {
-    return this._syncKeyBundle;
+    return this._personalSyncKeyBundle;
   },
 
   get username() {
@@ -263,7 +393,8 @@ SyncAuthManager.prototype = {
    * calculate a new key bundle, fetch a new token, etc.
    */
   resetCredentials() {
-    this._syncKeyBundle = null;
+    this._personalSyncKeyBundle = null;
+    this._enterpriseSyncKeyBundle = null;
     this._token = null;
     // The cluster URL comes from the token, so resetting it to empty will
     // force Sync to not accidentally use a value from an earlier token.
@@ -429,8 +560,26 @@ SyncAuthManager.prototype = {
       // otherwise, we may briefly enter a "needs reauthentication" state.
       // (XXX - the above may no longer be true - someone should check ;)
       token.expiration = this._now() + token.duration * 1000 * 0.8;
-      if (!this._syncKeyBundle) {
-        this._syncKeyBundle = lazy.BulkKeyBundle.fromJWK(key);
+      if (!this._personalSyncKeyBundle) {
+        this._personalSyncKeyBundle = lazy.BulkKeyBundle.fromJWK(key);
+      }
+      // Phase 2 Enterprise: also derive the enterprise-tier bundle if
+      // FxAccounts can produce it. Done lazily here (vs piggy-backing
+      // on the OAuth scoped-key flow above) to keep the FxA scope set
+      // unchanged. `fxa.getEnterpriseSyncKey()` (added in
+      // FxAccountsKeys) returns the JWK shape, or null if the build
+      // is not MOZ_ENTERPRISE / kB isn't available.
+      if (AppConstants.MOZ_ENTERPRISE && !this._enterpriseSyncKeyBundle) {
+        try {
+          const eKey = await fxa.getEnterpriseSyncKey();
+          if (eKey) {
+            this._enterpriseSyncKeyBundle = lazy.BulkKeyBundle.fromJWK(eKey);
+          }
+        } catch (e) {
+          this._log.warn(
+            "Couldn't derive enterprise sync key bundle: " + e.message
+          );
+        }
       }
       lazy.Weave.Status.login = LOGIN_SUCCEEDED;
       this._token = token;

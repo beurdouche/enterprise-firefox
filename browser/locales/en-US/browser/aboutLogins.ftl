@@ -122,6 +122,18 @@ about-logins-login-item-save-changes-button = Save
 login-item-save-new-button = Save
 login-item-cancel-button = Cancel
 
+# Enterprise vault routing UI in about:logins. Shown only when the
+# build is MOZ_ENTERPRISE and services.sync.vault.routing.enabled is
+# true.
+about-logins-login-item-vault-label = Vault
+about-logins-login-item-vault-option-choose = Choose…
+about-logins-login-item-vault-option-personal = Personal
+about-logins-login-item-vault-option-enterprise = Enterprise
+about-logins-login-item-vault-chip-personal = Personal
+  .title = Only you can read this
+about-logins-login-item-vault-chip-enterprise = Enterprise
+  .title = Your organization can recover this
+
 ## The date is displayed in a timeline showing the password evolution.
 ## A label is displayed under the date to describe the type of change.
 ## (e.g. updated, created, etc.)

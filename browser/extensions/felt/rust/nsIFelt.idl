@@ -6,7 +6,7 @@
 #include "nsISupports.idl"
 #include "nsICookie.idl"
 
-[scriptable, uuid(373195cb-bbb9-4e01-b276-b799a18ca355)]
+[scriptable, uuid(7d3b9c45-5a6e-4d8c-b0f1-c8e2d3a4b5c6)]
 interface nsIFelt : nsISupports {
   [must_use]
   ACString oneShotIpcServer();
@@ -68,6 +68,45 @@ interface nsIFelt : nsISupports {
 
   [must_use]
   void clearTokens();
+
+  /**
+   * Store the PBKDF2-stretched derivative of the user's SSO password.
+   *
+   * IMPORTANT: callers must pass the stretched bytes (hex), NOT the
+   * raw password. Stretching happens in the Felt UI process so the
+   * raw password never crosses the IPC boundary into the spawned
+   * Firefox. See FeltProcessParent::_stretchSSOPasswordLocally.
+   *
+   * Held only in in-memory state; not persisted, not logged.
+   */
+  [must_use]
+  void setSSOPassword(in ACString stretchedHex);
+
+  /**
+   * Push the previously-set stretched value to the spawned Firefox
+   * via the existing Felt IPC channel. Mirrors sendAccessToken.
+   */
+  [must_use]
+  void sendSSOPassword();
+
+  /**
+   * In the spawned Firefox: read the stretched-password derivative
+   * previously received over IPC. Returns the empty string if none.
+   * Non-consuming — multiple readers (BrowserGlue for NSS-slot mix,
+   * FxAccountsKeys for kSyncPersonal derivation) can call this on
+   * every use during the session. Cleared explicitly via
+   * clearCapturedSSOPassword on logout.
+   */
+  [must_use]
+  ACString peekCapturedSSOPassword();
+
+  /**
+   * In the spawned Firefox: zero the captured stretched-password
+   * slot. Call on logout / sign-out so subsequent readers see an
+   * empty value.
+   */
+  [must_use]
+  void clearCapturedSSOPassword();
 
   [must_use]
   void sendExtensionReady();

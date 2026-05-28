@@ -541,6 +541,17 @@ export class FxAccounts {
     });
   }
 
+  /**
+   * Phase 2 Enterprise: return the kSyncEnterprise-derived sync key
+   * JWK, or null when not Enterprise / key not derived. Delegates to
+   * FxAccountsKeys; see that module for the derivation contract.
+   */
+  getEnterpriseSyncKey() {
+    return this._withCurrentAccountState(async () => {
+      return this.keys.getEnterpriseSyncKey();
+    });
+  }
+
   resetFxAccountsClient() {
     this._internal.resetFxAccountsClient();
   }
@@ -1174,6 +1185,13 @@ FxAccountsInternal.prototype = {
       // need to wait until we destroy the oauth tokens if we want that to succeed.
       lazy.FxAccountsConfig.resetConfigURLs();
     }
+    // Phase 1 Enterprise: zero the captured stretched SSO password in
+    // the Felt slot so a subsequent sync derivation falls back to the
+    // device-local lockstore secret rather than reusing a stale value
+    // from a different identity.
+    try {
+      Services.felt?.clearCapturedSSOPassword?.();
+    } catch (e) {}
     return this.notifyObservers(ONLOGOUT_NOTIFICATION);
   },
 

@@ -71,6 +71,11 @@ TabEngine.prototype = {
   _trackerObj: TabTracker,
   syncPriority: 3,
 
+  // Phase 2 Enterprise vault routing via the JS-side tag store. The
+  // two-pass loop wraps the existing `_sync` override below (which
+  // takes the engineLock and delegates to BridgedEngine._sync).
+  _vaultAwareViaTagStore: true,
+
   async prepareTheBridge(isQuickWrite) {
     let clientsEngine = this.service.clientsEngine;
     // Tell the bridged engine about clients.
@@ -319,6 +324,10 @@ TabEngine.prototype = {
   },
 
   async _sync() {
+    return SyncEngine.runVaultLoop(this, () => this._syncOnce());
+  },
+
+  async _syncOnce() {
     try {
       await this._engineLock("tabs.js: fullSync", async () => {
         await super._sync();

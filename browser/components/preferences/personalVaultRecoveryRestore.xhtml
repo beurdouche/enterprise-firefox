@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+
+<?csp default-src chrome:; img-src chrome: data:; style-src chrome:
+'unsafe-inline'; ?>
+
+<window
+  id="personalVaultRecoveryRestoreDialog"
+  type="child"
+  xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+  xmlns:html="http://www.w3.org/1999/xhtml"
+  title="Restore personal vault"
+>
+  <dialog id="personalVaultRecoveryRestore" buttons="accept,cancel">
+    <linkset>
+      <html:link rel="stylesheet" href="chrome://global/skin/global.css" />
+    </linkset>
+    <script src="chrome://browser/content/preferences/personalVaultRecoveryRestore.js" />
+
+    <vbox flex="1" style="min-width: 520px; padding: 1em;">
+      <description>
+        Enter the 24-word recovery phrase from your other device to
+        unlock the personal vault on this one. The phrase is case
+        insensitive; spaces and line breaks are ignored.
+      </description>
+      <html:textarea
+        id="mnemonicInput"
+        rows="6"
+        style="margin: 1em 0; font-family: monospace; width: 100%;"
+        spellcheck="false"
+        autofocus="true">
+      </html:textarea>
+    </vbox>
+  </dialog>
+</window>

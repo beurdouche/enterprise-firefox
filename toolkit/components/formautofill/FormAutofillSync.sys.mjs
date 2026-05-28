@@ -12,6 +12,13 @@ import { CryptoWrapper } from "resource://services-sync/record.sys.mjs";
 import { Utils } from "resource://services-sync/util.sys.mjs";
 
 import { SCORE_INCREMENT_XLARGE } from "resource://services-sync/constants.sys.mjs";
+import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
+
+// Phase 2 Enterprise vault routing. Mirrors the PasswordEngine pref.
+// When true on an MOZ_ENTERPRISE build, the addresses + creditcards
+// engines run two sync passes (personal then enterprise) and filter
+// records by their stored vault tag.
+const VAULT_ROUTING_PREF = "services.sync.vault.routing.enabled";
 
 const lazy = {};
 
@@ -46,16 +53,30 @@ export function AutofillRecord(collection, id) {
 
 AutofillRecord.prototype = {
   toEntry() {
-    return Object.assign(
+    let entry = Object.assign(
       {
         guid: this.id,
       },
       this.entry
     );
+    // Phase 2 Enterprise vault tag. Stored on the entry so the local
+    // storage layer (FormAutofillStorageBase) preserves it through
+    // its unknown-field round-trip.
+    if (this.vault === "personal" || this.vault === "enterprise") {
+      entry.vault = this.vault;
+    }
+    return entry;
   },
 
   fromEntry(entry) {
     this.id = entry.guid;
+    // Lift the vault tag off the entry so it lives at the record level
+    // and survives the wire round-trip (see deferGetSet below).
+    if (entry.vault === "personal" || entry.vault === "enterprise") {
+      this.vault = entry.vault;
+    } else {
+      this.vault = "personal";
+    }
     this.entry = entry;
     // The GUID is already stored in record.id, so we nuke it from the entry
     // itself to save a tiny bit of space. The formAutofillStorage clones profiles,
@@ -66,13 +87,17 @@ AutofillRecord.prototype = {
   cleartextToString() {
     // And a helper so logging a *Sync* record auto sanitizes.
     let record = this.cleartext;
-    return JSON.stringify({ entry: sanitizeStorageObject(record.entry) });
+    return JSON.stringify({
+      entry: sanitizeStorageObject(record.entry),
+      vault: record.vault,
+    });
   },
 };
 Object.setPrototypeOf(AutofillRecord.prototype, CryptoWrapper.prototype);
 
-// Profile data is stored in the "entry" object of the record.
-Utils.deferGetSet(AutofillRecord, "cleartext", ["entry"]);
+// Profile data is stored in the "entry" object of the record. The
+// Phase 2 Enterprise vault tag travels alongside as a sibling field.
+Utils.deferGetSet(AutofillRecord, "cleartext", ["entry", "vault"]);
 
 function FormAutofillStore(name, engine) {
   Store.call(this, name, engine);
@@ -293,8 +318,39 @@ FormAutofillEngine.prototype = {
   },
 
   async _uploadOutgoing() {
-    this._modified.replace(this._store.storage.pullSyncChanges());
+    const allChanges = this._store.storage.pullSyncChanges();
+    if (this._activeVault) {
+      const filtered = {};
+      for (const [guid, change] of Object.entries(allChanges)) {
+        const recordVault = change.profile?.vault || "personal";
+        if (recordVault === this._activeVault) {
+          filtered[guid] = change;
+        }
+      }
+      this._modified.replace(filtered);
+    } else {
+      this._modified.replace(allChanges);
+    }
     await SyncEngine.prototype._uploadOutgoing.call(this);
+  },
+
+  async _sync() {
+    if (
+      !AppConstants.MOZ_ENTERPRISE ||
+      !Services.prefs.getBoolPref(VAULT_ROUTING_PREF, false)
+    ) {
+      return SyncEngine.prototype._sync.call(this);
+    }
+
+    for (const vault of ["personal", "enterprise"]) {
+      this._activeVault = vault;
+      try {
+        await SyncEngine.prototype._sync.call(this);
+      } finally {
+        this._activeVault = null;
+      }
+    }
+    return undefined;
   },
 
   // Typically, engines populate the changeset before downloading records.

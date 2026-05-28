@@ -29,6 +29,16 @@ address-capture-save-button =
 address-capture-not-now-button =
     .label = Not now
     .accessKey = N
+
+# Phase 2 Enterprise vault routing — the regular "Save" button is
+# replaced by these two on the address + credit-card save
+# doorhangers when MOZ_ENTERPRISE + services.sync.vault.routing.enabled.
+autofill-save-in-personal-button =
+    .label = Save in Personal
+    .accessKey = P
+autofill-save-in-enterprise-button =
+    .label = Save in Enterprise
+    .accessKey = E
 address-capture-cancel-button =
     .label = Cancel
     .accessKey = C

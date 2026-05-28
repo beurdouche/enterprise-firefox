@@ -359,6 +359,12 @@ export class AboutLoginsParent extends JSWindowActorParent {
     if (loginUpdates.hasOwnProperty("password")) {
       modifiedLogin.password = loginUpdates.password;
     }
+    if (
+      loginUpdates.vault === "personal" ||
+      loginUpdates.vault === "enterprise"
+    ) {
+      modifiedLogin.vault = loginUpdates.vault;
+    }
     try {
       await Services.logins.modifyLoginAsync(logins[0], modifiedLogin);
     } catch (error) {

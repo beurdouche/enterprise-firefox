@@ -224,6 +224,13 @@ PlacesController.prototype = {
             Ci.nsINavHistoryQueryOptions.SORT_BY_NONE
         );
       }
+      case "placesCmd_vault:personal":
+      case "placesCmd_vault:enterprise": {
+        // Enabled whenever a single URI node is selected; visibility +
+        // policy gating happens in _buildVaultSubmenu.
+        const node = this._view.selectedNode;
+        return !!(node && PlacesUtils.nodeIsURI(node));
+      }
       case "placesCmd_createBookmark": {
         return !this._view.selectedNodes.some(
           node => !PlacesUtils.nodeIsURI(node) || node.itemId != -1
@@ -322,6 +329,12 @@ PlacesController.prototype = {
       }
       case "placesCmd_showInFolder":
         this.showInFolder(this._view.selectedNode.bookmarkGuid);
+        break;
+      case "placesCmd_vault:personal":
+        this.setVaultFromContextMenu("personal").catch(console.error);
+        break;
+      case "placesCmd_vault:enterprise":
+        this.setVaultFromContextMenu("enterprise").catch(console.error);
         break;
     }
   },
@@ -675,7 +688,129 @@ PlacesController.prototype = {
       count: metadata.length,
     });
 
+    this._buildVaultSubmenu();
+
     return usableItemCount > 0;
+  },
+
+  /**
+   * Phase 2 Enterprise vault submenu in the places context menu. Lets
+   * the user move a single selected bookmark or history record between
+   * Personal and Enterprise vaults. Hidden when vault routing is off,
+   * for multi-select, for non-URI nodes (folders/separators), or when
+   * the relevant engine is policy-locked.
+   */
+  _buildVaultSubmenu() {
+    const submenu = document.getElementById("placesContext_vaultMenu");
+    const sep = document.getElementById("placesContext_vaultSeparator");
+    if (!submenu || !sep) {
+      return;
+    }
+    submenu.hidden = true;
+    sep.hidden = true;
+
+    const { VaultRouting } = ChromeUtils.importESModule(
+      "resource://services-sync/VaultRouting.sys.mjs"
+    );
+    if (!VaultRouting.isEnabled) {
+      return;
+    }
+    const nodes = this._view.selectedNodes;
+    if (!nodes || nodes.length !== 1) {
+      return;
+    }
+    const node = nodes[0];
+    if (!PlacesUtils.nodeIsURI(node)) {
+      return;
+    }
+    const isBookmark = PlacesUtils.nodeIsBookmark(node);
+    const engineName = isBookmark ? "bookmarks" : "history";
+    submenu.hidden = false;
+    sep.hidden = false;
+    submenu.dataset.placesEngine = engineName;
+    submenu.dataset.placesUri = node.uri || "";
+    submenu.dataset.placesBookmarkGuid = isBookmark
+      ? PlacesUtils.getConcreteItemGuid(node)
+      : "";
+
+    // For bookmarks we know the guid synchronously, so we can set the
+    // current vault checkmark immediately. For history we resolve the
+    // placeGuid asynchronously via PlacesUtils.history.fetch; if that
+    // resolves before the user clicks an item, the checkmark updates
+    // in-place.
+    const personal = document.getElementById("placesContext_vault:personal");
+    const enterprise = document.getElementById(
+      "placesContext_vault:enterprise"
+    );
+    const setChecked = vault => {
+      personal.setAttribute("checked", vault === "personal" ? "true" : "false");
+      enterprise.setAttribute(
+        "checked",
+        vault === "enterprise" ? "true" : "false"
+      );
+    };
+    setChecked("personal");
+    if (isBookmark) {
+      const guid = submenu.dataset.placesBookmarkGuid;
+      if (guid) {
+        setChecked(VaultRouting.getVault("bookmarks", guid) || "personal");
+      }
+    } else if (node.uri) {
+      PlacesUtils.history
+        .fetch(node.uri, { includeMeta: false, includeAnnotations: false })
+        .then(pageInfo => {
+          if (
+            pageInfo &&
+            submenu.dataset.placesUri === node.uri &&
+            !submenu.hidden
+          ) {
+            submenu.dataset.placesHistoryGuid = pageInfo.guid;
+            setChecked(
+              VaultRouting.getVault("history", pageInfo.guid) || "personal"
+            );
+          }
+        })
+        .catch(() => {});
+    }
+  },
+
+  /**
+   * Click handler for the placesContext_vault:{personal,enterprise}
+   * menuitems. Invoked from the menupopup's `oncommand` (wired in
+   * placesContextMenu.inc.xhtml via tree's contextmenu listener).
+   *
+   * @param {string} vault "personal" or "enterprise".
+   */
+  async setVaultFromContextMenu(vault) {
+    const submenu = document.getElementById("placesContext_vaultMenu");
+    if (!submenu || submenu.hidden) {
+      return;
+    }
+    const engine = submenu.dataset.placesEngine;
+    if (!engine) {
+      return;
+    }
+    const { VaultRouting } = ChromeUtils.importESModule(
+      "resource://services-sync/VaultRouting.sys.mjs"
+    );
+    if (engine === "bookmarks") {
+      const guid = submenu.dataset.placesBookmarkGuid;
+      if (guid) {
+        VaultRouting.setVault("bookmarks", guid, vault);
+      }
+      return;
+    }
+    let guid = submenu.dataset.placesHistoryGuid;
+    if (!guid && submenu.dataset.placesUri) {
+      const pageInfo = await PlacesUtils.history.fetch(
+        submenu.dataset.placesUri,
+        { includeMeta: false, includeAnnotations: false }
+      );
+      guid = pageInfo?.guid || "";
+    }
+    if (guid) {
+      VaultRouting.setVault("history", guid, vault);
+    }
   },
 
   /**

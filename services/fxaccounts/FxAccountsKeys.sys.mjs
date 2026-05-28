@@ -6,6 +6,8 @@ import { CommonUtils } from "resource://services-common/utils.sys.mjs";
 
 import { CryptoUtils } from "moz-src:///services/crypto/modules/utils.sys.mjs";
 
+import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
+
 import {
   SCOPE_APP_SYNC,
   DEPRECATED_SCOPE_ECOSYSTEM_TELEMETRY,
@@ -13,6 +15,12 @@ import {
   log,
   logPII,
 } from "resource://gre/modules/FxAccountsCommon.sys.mjs";
+
+const lazyKeys = {};
+ChromeUtils.defineESModuleGetters(lazyKeys, {
+  PersonalVaultRecoverySync:
+    "resource://services-sync/engines/personal_vault_recovery.sys.mjs",
+});
 
 // The following top-level fields have since been deprecated and exist here purely
 // to be removed from the account state when seen. After a reasonable period of time
@@ -36,6 +44,13 @@ const DEPRECATED_SCOPE_WEBEXT_SYNC = "sync:addon_storage";
 // We will, if necessary, migrate storage for those keys so that it's associated with
 // these scopes.
 const LEGACY_DERIVED_KEY_SCOPES = [SCOPE_APP_SYNC];
+
+// Phase 2 Enterprise: parallel entry in `scopedKeys` for the
+// kSyncEnterprise-derived variant of the legacy sync key. Stored under
+// a derived name (not an OAuth scope) so the existing
+// LEGACY_DERIVED_KEY_SCOPES check on _loadOrFetchKeys doesn't try to
+// migrate-or-fetch it from the server.
+const ENTERPRISE_SYNC_KEY_NAME = SCOPE_APP_SYNC + "#enterprise";
 
 // These are scopes that we used to store, but are no longer using,
 // and hence should be deleted from storage if present.
@@ -526,9 +541,45 @@ export class FxAccountsKeys {
       kBbytes,
       scopedKeysMetadata
     );
+    // Phase 2 Enterprise: derive and store the parallel enterprise-tier
+    // sync key alongside the personal-tier one (which `_deriveScopedKeys`
+    // produced under SCOPE_APP_SYNC). Stored under a derived key name so
+    // we can fetch it later via `getEnterpriseSyncKey()`. The key
+    // material is local-only and never leaves the device.
+    if (
+      AppConstants.MOZ_ENTERPRISE &&
+      scopedKeysMetadata.hasOwnProperty(SCOPE_APP_SYNC)
+    ) {
+      try {
+        const kid = await this._deriveXClientState(kBbytes);
+        const enterpriseKey = await this._deriveSyncKeyEnterprise(kBbytes);
+        scopedKeys[ENTERPRISE_SYNC_KEY_NAME] = this._formatLegacyScopedKey(
+          CommonUtils.byteStringToArrayBuffer(kid),
+          CommonUtils.byteStringToArrayBuffer(enterpriseKey),
+          SCOPE_APP_SYNC,
+          scopedKeysMetadata[SCOPE_APP_SYNC]
+        );
+      } catch (e) {
+        log.warn("Failed to derive enterprise sync key: " + e);
+      }
+    }
     return {
       scopedKeys,
     };
+  }
+
+  /**
+   * Phase 2 Enterprise: return the enterprise-tier sync key JWK, if
+   * available. Mirrors getKeyForScope(SCOPE_APP_SYNC) but for the
+   * kSyncEnterprise-derived variant. Returns null when not Enterprise
+   * or when the key hasn't been derived yet.
+   */
+  async getEnterpriseSyncKey() {
+    if (!AppConstants.MOZ_ENTERPRISE) {
+      return null;
+    }
+    const { scopedKeys } = await this._loadOrFetchKeys();
+    return scopedKeys?.[ENTERPRISE_SYNC_KEY_NAME] || null;
   }
 
   /**
@@ -663,7 +714,9 @@ export class FxAccountsKeys {
     let kid, key;
     if (scope == SCOPE_APP_SYNC) {
       kid = await this._deriveXClientState(kBbytes);
-      key = await this._deriveSyncKey(kBbytes);
+      // Phase 1: route the legacy scoped sync key through kSyncPersonal.
+      // Phase 2 will pick per engine; for now everything personal.
+      key = await this._deriveSyncKeyPersonal(kBbytes);
     } else {
       throw new Error(`Unexpected legacy key-bearing scope: ${scope}`);
     }
@@ -700,7 +753,384 @@ export class FxAccountsKeys {
    *
    * @returns Promise<HKDF(kB, undefined, "identity.mozilla.com/picl/v1/oldsync", 64)>
    */
-  async _deriveSyncKey(kBbytes) {
+  async _deriveSyncKeyPersonal(kBbytes) {
+    if (AppConstants.MOZ_ENTERPRISE) {
+      // In Enterprise builds derive two key families:
+      //
+      //   kSyncEnterprise = HKDF(kB, salt=undefined,
+      //                          info="identity.mozilla.com/picl/v1/oldsync", 64)
+      //   kSyncPersonal   = HKDF(kB, salt=personalSecret,
+      //                          info="identity.mozilla.com/picl/v1/oldsync-personal", 64)
+      //
+      // The `personalSecret` is the PBKDF2-stretched derivative of
+      // the user's IDP password, computed inside the Felt UI process
+      // at SSO time and shipped over IPC. Admin holding primarySecret
+      // + NSS + SDR can derive kSyncEnterprise (it's the same shape
+      // as today's consumer kSync), but CANNOT derive kSyncPersonal
+      // without the personalSecret.
+      //
+      // When the SSO password isn't available (external-IDP
+      // deployment, Felt extension missing, or the IPC delivery
+      // race), fall back to a device-local DEK held by the lockstore
+      // under `lockstore::kek::local`. The DEK is generated on first
+      // use and persisted across sessions. The fallback secret is
+      // NOT derivable from kB or primarySecret; an admin who only
+      // holds those still cannot decrypt personal-vault data without
+      // also gaining filesystem access to the user's profile.
+      // Cross-device decryption of data uploaded in this mode is
+      // broken by design — each device has its own DEK, so Sync will
+      // surface HMAC failures on a second device until a shared
+      // secret (SSO password) is available.
+      let personalSecret = "";
+      try {
+        personalSecret = Services.felt?.peekCapturedSSOPassword?.() ?? "";
+      } catch (e) {
+        personalSecret = "";
+      }
+      if (!personalSecret) {
+        personalSecret = await this._getOrCreateLocalFallbackSecret();
+      }
+      return CryptoUtils.hkdfLegacy(
+        kBbytes,
+        personalSecret,
+        "identity.mozilla.com/picl/v1/oldsync-personal",
+        2 * 32
+      );
+    }
+    return CryptoUtils.hkdfLegacy(
+      kBbytes,
+      undefined,
+      "identity.mozilla.com/picl/v1/oldsync",
+      2 * 32
+    );
+  }
+
+  /**
+   * Read (or create on first use) a 32-byte device-local DEK from the
+   * lockstore, used as the kSyncPersonal HKDF salt when the captured
+   * SSO password is unavailable. The DEK is wrapped under a
+   * dynamically-minted Local KEK (the upstream multi-instance-KEK
+   * model rejects the canonical `lockstore::kek::local` ref), is
+   * generated on first use, persists across sessions, and never
+   * leaves the device. Returns a 64-char lowercase hex string.
+   *
+   * The key never derives from kB or primarySecret: an admin holding
+   * those alone cannot derive this salt. Cross-device sync of records
+   * encrypted under this salt is broken by design (each device gets
+   * its own DEK).
+   */
+  async _getOrCreateLocalFallbackSecret() {
+    const COLLECTION = "sync_personal_fallback_v1";
+
+    // 1. Day-to-day path: silent local KEK already provisioned.
+    let kekRef = await this._findLocalKekRef(COLLECTION);
+    if (kekRef) {
+      const bytes = await Services.lockstore.getDek(COLLECTION, kekRef);
+      return this._bytesToHex(bytes);
+    }
+
+    // 2. New-device recovery: sync may already have a recovery record.
+    const recovery = await lazyKeys.PersonalVaultRecoverySync.fetchLatest();
+    if (recovery && recovery.local_kek_ref) {
+      await this._restoreFromRecovery(COLLECTION, recovery);
+      const bytes = await Services.lockstore.getDek(
+        COLLECTION,
+        recovery.local_kek_ref
+      );
+      return this._bytesToHex(bytes);
+    }
+
+    // 3. Fresh-install path: mint everything, seal under a mnemonic,
+    // and upload the recovery record for future devices.
+    return this._bootstrapPersonalVault(COLLECTION);
+  }
+
+  async _findLocalKekRef(collection) {
+    try {
+      const refs = await Services.lockstore.listKeks(collection);
+      for (const ref of refs) {
+        if (ref.startsWith("lockstore::kek::local:")) {
+          return ref;
+        }
+      }
+    } catch (e) {
+      if (e.result !== Cr.NS_ERROR_NOT_AVAILABLE) {
+        throw e;
+      }
+    }
+    return "";
+  }
+
+  _bytesToHex(bytes) {
+    let out = "";
+    for (let i = 0; i < bytes.length; i++) {
+      out += bytes[i].toString(16).padStart(2, "0");
+    }
+    return out;
+  }
+
+  _base64UrlEncode(bytes) {
+    let bin = "";
+    for (let i = 0; i < bytes.length; i++) {
+      bin += String.fromCharCode(bytes[i]);
+    }
+    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+
+  _base64UrlDecode(s) {
+    const pad = s.length % 4 === 0 ? 0 : 4 - (s.length % 4);
+    const padded = s.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat(pad);
+    const bin = atob(padded);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) {
+      out[i] = bin.charCodeAt(i);
+    }
+    return out;
+  }
+
+  async _derivePbkdf2Aes256(passphrase, saltBytes, iterations) {
+    const enc = new TextEncoder();
+    const baseKey = await crypto.subtle.importKey(
+      "raw",
+      enc.encode(passphrase),
+      { name: "PBKDF2" },
+      false,
+      ["deriveBits"]
+    );
+    const bits = await crypto.subtle.deriveBits(
+      {
+        name: "PBKDF2",
+        hash: "SHA-256",
+        salt: saltBytes,
+        iterations,
+      },
+      baseKey,
+      256
+    );
+    return new Uint8Array(bits);
+  }
+
+  async _aesGcmEncrypt(rawKeyBytes, nonceBytes, plaintextBytes) {
+    const key = await crypto.subtle.importKey(
+      "raw",
+      rawKeyBytes,
+      { name: "AES-GCM" },
+      false,
+      ["encrypt"]
+    );
+    const ct = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv: nonceBytes },
+      key,
+      plaintextBytes
+    );
+    return new Uint8Array(ct);
+  }
+
+  async _aesGcmDecrypt(rawKeyBytes, nonceBytes, ctBytes) {
+    const key = await crypto.subtle.importKey(
+      "raw",
+      rawKeyBytes,
+      { name: "AES-GCM" },
+      false,
+      ["decrypt"]
+    );
+    const pt = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: nonceBytes },
+      key,
+      ctBytes
+    );
+    return new Uint8Array(pt);
+  }
+
+  async _promptMnemonic() {
+    // UI integration point: the recovery prompt dialog lives in
+    // browser/components/preferences/personalVaultRecoveryRestore.
+    // Until the chrome wiring exists, callers in test environments
+    // can replace this method. Production code routes through the
+    // window watcher to open the restore dialog.
+    const ww = Cc["@mozilla.org/embedcomp/window-watcher;1"].getService(
+      Ci.nsIWindowWatcher
+    );
+    const args = Cc["@mozilla.org/array;1"].createInstance(
+      Ci.nsIMutableArray
+    );
+    const supportsString = Cc["@mozilla.org/supports-string;1"].createInstance(
+      Ci.nsISupportsString
+    );
+    supportsString.data = "";
+    args.appendElement(supportsString);
+    ww.openWindow(
+      null,
+      "chrome://browser/content/preferences/personalVaultRecoveryRestore.xhtml",
+      "_blank",
+      "chrome,modal,centerscreen",
+      args
+    );
+    if (!supportsString.data) {
+      throw Components.Exception(
+        "User cancelled personal-vault recovery prompt",
+        Cr.NS_ERROR_ABORT
+      );
+    }
+    return supportsString.data;
+  }
+
+  async _showMnemonicSetup(mnemonic) {
+    const ww = Cc["@mozilla.org/embedcomp/window-watcher;1"].getService(
+      Ci.nsIWindowWatcher
+    );
+    const args = Cc["@mozilla.org/array;1"].createInstance(
+      Ci.nsIMutableArray
+    );
+    const supportsString = Cc["@mozilla.org/supports-string;1"].createInstance(
+      Ci.nsISupportsString
+    );
+    supportsString.data = mnemonic;
+    args.appendElement(supportsString);
+    const result = Cc["@mozilla.org/supports-PRBool;1"].createInstance(
+      Ci.nsISupportsPRBool
+    );
+    result.data = false;
+    args.appendElement(result);
+    ww.openWindow(
+      null,
+      "chrome://browser/content/preferences/personalVaultRecoverySetup.xhtml",
+      "_blank",
+      "chrome,modal,centerscreen",
+      args
+    );
+    if (!result.data) {
+      throw Components.Exception(
+        "User cancelled personal-vault setup",
+        Cr.NS_ERROR_ABORT
+      );
+    }
+  }
+
+  async _restoreFromRecovery(collection, recovery) {
+    const bip39 = Cc["@mozilla.org/security/bip39;1"].getService(Ci.nsIBip39);
+    const RETRIES = 3;
+    let lastErr;
+    for (let attempt = 0; attempt < RETRIES; attempt++) {
+      let mnemonic;
+      try {
+        mnemonic = await this._promptMnemonic();
+      } catch (e) {
+        throw e;
+      }
+      try {
+        bip39.validate(mnemonic);
+      } catch (_) {
+        lastErr = "checksum";
+        continue;
+      }
+      const saltBytes = this._base64UrlDecode(recovery.salt);
+      const candidateKek = await this._derivePbkdf2Aes256(
+        mnemonic,
+        saltBytes,
+        recovery.iter
+      );
+      const nonce = this._base64UrlDecode(recovery.verifier_nonce);
+      const ct = this._base64UrlDecode(recovery.verifier_ct);
+      try {
+        const pt = await this._aesGcmDecrypt(candidateKek, nonce, ct);
+        const dec = new TextDecoder().decode(pt);
+        if (dec !== "lockstore-pv-v1") {
+          throw new Error("verifier mismatch");
+        }
+      } catch (_) {
+        candidateKek.fill(0);
+        lastErr = "verifier";
+        continue;
+      }
+
+      await Services.lockstore.importLocalKek(
+        recovery.local_kek_ref,
+        Array.from(candidateKek)
+      );
+      const wrappedDekBytes = this._base64UrlDecode(
+        recovery.wrapped_deks[collection]
+      );
+      await Services.lockstore.importWrappedDek(
+        collection,
+        recovery.local_kek_ref,
+        Array.from(wrappedDekBytes)
+      );
+      candidateKek.fill(0);
+      return;
+    }
+    throw Components.Exception(
+      `Personal-vault recovery failed after ${RETRIES} attempts (${lastErr})`,
+      Cr.NS_ERROR_ABORT
+    );
+  }
+
+  async _bootstrapPersonalVault(collection) {
+    const bip39 = Cc["@mozilla.org/security/bip39;1"].getService(Ci.nsIBip39);
+    const mnemonic = bip39.generate(24);
+    await this._showMnemonicSetup(mnemonic);
+
+    const saltBytes = crypto.getRandomValues(new Uint8Array(16));
+    const iter = 800000;
+    const kekBytes = await this._derivePbkdf2Aes256(mnemonic, saltBytes, iter);
+
+    // Mint a fresh local kek_ref of the same shape lockstore itself
+    // produces: lockstore::kek::local:<base64url(12 random bytes)>.
+    const refSuffix = this._base64UrlEncode(
+      crypto.getRandomValues(new Uint8Array(12))
+    );
+    const kekRef = `lockstore::kek::local:${refSuffix}`;
+
+    await Services.lockstore.importLocalKek(kekRef, Array.from(kekBytes));
+    await Services.lockstore.createDek(
+      collection,
+      kekRef,
+      /* extractable */ true
+    );
+
+    const verifierNonce = crypto.getRandomValues(new Uint8Array(12));
+    const verifierCt = await this._aesGcmEncrypt(
+      kekBytes,
+      verifierNonce,
+      new TextEncoder().encode("lockstore-pv-v1")
+    );
+
+    const wrappedDekBytes = await Services.lockstore.exportWrappedDek(
+      collection,
+      kekRef
+    );
+
+    const record = {
+      v: 1,
+      local_kek_ref: kekRef,
+      salt: this._base64UrlEncode(saltBytes),
+      iter,
+      verifier_nonce: this._base64UrlEncode(verifierNonce),
+      verifier_ct: this._base64UrlEncode(verifierCt),
+      wrapped_deks: {
+        [collection]: this._base64UrlEncode(new Uint8Array(wrappedDekBytes)),
+      },
+    };
+    await lazyKeys.PersonalVaultRecoverySync.upload(record);
+
+    kekBytes.fill(0);
+
+    const bytes = await Services.lockstore.getDek(collection, kekRef);
+    return this._bytesToHex(bytes);
+  }
+
+  /**
+   * Derive the admin-recoverable Enterprise sync key from kB.
+   *
+   * Identical to the consumer kSync derivation. Provided as a sibling
+   * helper for Phase-2 per-engine selection in CollectionKeyManager
+   * (engines the user/admin tags as "enterprise" use this root
+   * instead of kSyncPersonal).
+   *
+   * @param {string} kBbytes The user's master account key.
+   * @returns {Promise<string>} 64-byte HKDF output.
+   */
+  async _deriveSyncKeyEnterprise(kBbytes) {
     return CryptoUtils.hkdfLegacy(
       kBbytes,
       undefined,

@@ -6,6 +6,7 @@ with Files("**"):
     BUG_COMPONENT = ("Core", "Security")
 
 XPIDL_SOURCES += [
+    "nsIBip39.idl",
     "nsILockstore.idl",
 ]
 
@@ -16,10 +17,12 @@ XPCOM_MANIFESTS += [
 ]
 
 EXPORTS += [
+    "Bip39Service.h",
     "LockstoreService.h",
 ]
 
 UNIFIED_SOURCES += [
+    "Bip39Service.cpp",
     "LockstoreService.cpp",
 ]
 

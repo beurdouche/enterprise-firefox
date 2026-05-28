@@ -9,7 +9,7 @@
  * An object containing information for a login stored by the
  * password manager.
  */
-[scriptable, uuid(c41b7dff-6b9b-42fe-b78d-113051facb05)]
+[scriptable, uuid(4d2e1f4a-7b8c-4d6e-9a0f-1c2b3d4e5f61)]
 interface nsILoginInfo : nsISupports {
   /**
    * A string to display to the user for the origin which includes the httpRealm,
@@ -99,6 +99,30 @@ interface nsILoginInfo : nsISupports {
    * for other clients to prevent data loss
    */
   attribute AString unknownFields;
+
+  /**
+   * Enterprise vault tag: "personal" or "enterprise".
+   *
+   * In MOZ_ENTERPRISE builds with vault-aware Sync (Phase 2+), each
+   * login lives in exactly one vault. Personal-tagged logins sync to
+   * the `passwords-personal` collection encrypted under kSyncPersonal;
+   * enterprise-tagged logins sync to `passwords-enterprise` under
+   * kSyncEnterprise. The empty string (legacy records) reads as
+   * "personal" by convention.
+   */
+  attribute AString vault;
+
+  /**
+   * The vault the record was most recently synced under (Phase 2+).
+   *
+   * "personal", "enterprise", or empty (never synced under any vault).
+   * Used by PasswordEngine to detect re-tag events: if `vault` differs
+   * from `vaultLastSynced`, the next sync emits a tombstone in the
+   * collection corresponding to `vaultLastSynced` (deleting the stale
+   * BSO) and a fresh upload in the collection for `vault`. After both
+   * uploads succeed, `vaultLastSynced` is updated to match `vault`.
+   */
+  attribute AString vaultLastSynced;
 
   /**
    * True if the login has ever been synced at some point.

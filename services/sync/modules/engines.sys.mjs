@@ -4,6 +4,7 @@
 
 import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 
+import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
 import { JSONFile } from "resource://gre/modules/JSONFile.sys.mjs";
 import { Log } from "resource://gre/modules/Log.sys.mjs";
 
@@ -820,6 +821,42 @@ SyncEngine.kRecoveryStrategy = {
   error: "error",
 };
 
+// Phase 2 Enterprise: invoke from a vault-aware engine's `_sync`
+// override to run two passes (personal, then enterprise) when vault
+// routing is on, or fall through to a single pass otherwise. The
+// passed `coreSync` is the function that runs one pass — typically
+// `SyncEngine.prototype._sync.call(this)`.
+SyncEngine.runVaultLoop = async function (engine, coreSync) {
+  if (
+    !AppConstants.MOZ_ENTERPRISE ||
+    !Services.prefs.getBoolPref("services.sync.vault.routing.enabled", false)
+  ) {
+    return coreSync();
+  }
+  const vaults = ["personal", "enterprise"];
+  for (let i = 0; i < vaults.length; i++) {
+    engine._activeVault = vaults[i];
+    try {
+      await coreSync();
+    } finally {
+      engine._activeVault = null;
+    }
+    // Between passes, tell the telemetry observer to drop the
+    // per-pass duplicate-detection guards (this.incoming and
+    // this.validation on the current EngineRecord). Without this,
+    // the second pass's `weave:engine:sync:applied` and
+    // `weave:engine:validate:finish` notifications trip
+    // "Incoming records applied multiple times" / "Multiple
+    // validations occurred" ERROR logs in
+    // services/sync/modules/telemetry.sys.mjs, polluting the sync
+    // ping with false positives even though both passes succeed.
+    if (i < vaults.length - 1) {
+      Observers.notify("weave:engine:sync:vault-transition", null, engine.name);
+    }
+  }
+  return undefined;
+};
+
 SyncEngine.prototype = {
   _recordObj: CryptoWrapper,
   // _storeObj, and _trackerObj should to be overridden in subclasses
@@ -926,12 +963,93 @@ SyncEngine.prototype = {
     return this.service.storageURL;
   },
 
-  get engineURL() {
-    return this.storageURL + this.name;
+  // Phase 2 Enterprise vault routing. When set on a vault-aware
+  // engine subclass (PasswordEngine, AddressesEngine, CreditCardsEngine)
+  // during a sync pass, the engine uploads/downloads against the
+  // per-vault collection ("<name>-personal" or "<name>-enterprise")
+  // and tags BSO envelopes with that collection name. Persistent
+  // state (prefs, queue files, log channel) stays on the base name
+  // so we don't fork sync metadata per pass.
+  _activeVault: null,
+
+  // Phase 2 Enterprise: engines that don't carry the vault tag on
+  // their local records (bridged engines + simple JS engines whose
+  // record types don't have a natural slot) flip this to true. The
+  // base SyncEngine then mirrors the PasswordEngine two-pass
+  // behaviour using Service.vaultTagStore as the per-record source
+  // of truth for vault state.
+  _vaultAwareViaTagStore: false,
+
+  get _collectionName() {
+    return this._activeVault ? `${this.name}-${this._activeVault}` : this.name;
   },
 
-  get cryptoKeysURL() {
+  // Resolves a record's effective vault. The user's per-record tag
+  // from the side-table is the only input — no admin override exists,
+  // so no policy or pref can force a record into the admin-recoverable
+  // collection against the user's choice. Untagged records default
+  // to "personal" (the safer tier).
+  _vaultFor(recordId) {
+    if (!this._vaultAwareViaTagStore) {
+      return null;
+    }
+    return (
+      this.service.vaultTagStore?.get(this.name, recordId)?.vault || "personal"
+    );
+  },
+
+  // Reads the previously-synced vault from the side-table. Used to
+  // detect re-tag candidates that need a tombstone in the old vault's
+  // collection.
+  _vaultLastSyncedFor(recordId) {
+    if (!this._vaultAwareViaTagStore) {
+      return "";
+    }
+    return (
+      this.service.vaultTagStore?.get(this.name, recordId)?.vaultLastSynced ||
+      ""
+    );
+  },
+
+  // Engine-internal: classify a record for the current vault pass.
+  // Returns "match" (upload normally), "tombstone" (record moved out
+  // of this vault since last sync — emit a deleted BSO here), or
+  // "skip" (record belongs to the other vault and there's no stale
+  // BSO in this collection).
+  _classifyForActiveVault(recordId) {
+    if (!this._activeVault || !this._vaultAwareViaTagStore) {
+      return "match";
+    }
+    const vault = this._vaultFor(recordId) || "personal";
+    const lastSynced = this._vaultLastSyncedFor(recordId);
+    if (vault === this._activeVault) {
+      return "match";
+    }
+    if (lastSynced === this._activeVault) {
+      return "tombstone";
+    }
+    return "skip";
+  },
+
+  get engineURL() {
+    return this.storageURL + this._collectionName;
+  },
+
+  // Phase 2 Enterprise: personal-tier crypto/keys URL. Existing
+  // callers may still reference this engine getter; the personal tier
+  // is the existing crypto/keys BSO. Use cryptoEnterpriseKeysURL for
+  // the new enterprise-tier BSO when explicitly addressing it.
+  get cryptoPersonalKeysURL() {
     return this.storageURL + "crypto/keys";
+  },
+
+  get cryptoEnterpriseKeysURL() {
+    return this.storageURL + "crypto/keys-enterprise";
+  },
+
+  /** @deprecated Pre-Phase-2 alias for cryptoPersonalKeysURL. */
+  get cryptoKeysURL() {
+    return this.cryptoPersonalKeysURL;
   },
 
   get metaURL() {
@@ -1125,22 +1243,101 @@ SyncEngine.prototype = {
    * method to bypass the tracker for certain or all changed items.
    */
   async getChangedIDs() {
-    return this._tracker.getChangedIDs();
+    const changes = await this._tracker.getChangedIDs();
+    return this._applyVaultRoutingToChanges(changes);
+  },
+
+  // Phase 2 Enterprise: when a vault pass is active on a
+  // tag-store-backed engine, filter the changeset to the records
+  // that belong in this pass and inject re-tag candidates so the
+  // active vault's collection gets a tombstone for stale BSOs.
+  // Engines that own their own dirty tracking (PasswordEngine,
+  // FormAutofillEngine) handle this inline and skip this hook.
+  _applyVaultRoutingToChanges(changes) {
+    if (!this._vaultAwareViaTagStore || !this._activeVault) {
+      return changes;
+    }
+    const filtered = {};
+    const now = Math.round(Date.now() / 10) / 100;
+    for (const id of Object.keys(changes)) {
+      const cls = this._classifyForActiveVault(id);
+      if (cls === "skip") {
+        continue;
+      }
+      filtered[id] = changes[id];
+      if (cls === "tombstone") {
+        // Don't trust the tracker's modified-time for the synthetic
+        // tombstone; the user re-tagged this record and we want the
+        // sync to claim recency.
+        if (typeof filtered[id] === "object") {
+          filtered[id] = Object.assign({}, filtered[id], {
+            deleted: true,
+            retagTombstone: true,
+            modified: filtered[id].modified || now,
+          });
+        } else {
+          filtered[id] = { deleted: true, retagTombstone: true, modified: now };
+        }
+      }
+    }
+    // Inject re-tag candidates the tracker doesn't know about — e.g.,
+    // a user flipped a vault tag without otherwise modifying the
+    // record. The tag store's dirty set is the source of truth.
+    const dirty = this.service.vaultTagStore?.getDirty(this.name);
+    if (dirty) {
+      for (const id of dirty) {
+        if (id in filtered) {
+          continue;
+        }
+        const cls = this._classifyForActiveVault(id);
+        if (cls === "skip") {
+          continue;
+        }
+        const base = { modified: now };
+        if (cls === "tombstone") {
+          filtered[id] = Object.assign(base, {
+            deleted: true,
+            retagTombstone: true,
+          });
+        } else {
+          filtered[id] = base;
+        }
+      }
+    }
+    return filtered;
   },
 
   // Create a new record using the store and add in metadata.
   async _createRecord(id) {
-    let record = await this._store.createRecord(id, this.name);
+    // Phase 2 Enterprise: when a vault pass is active on a
+    // tag-store-backed engine and this record's vault has moved out
+    // of the active vault, emit a tombstone to delete the stale BSO
+    // from this collection. The new-vault pass will upload the
+    // fresh record separately.
+    if (
+      this._vaultAwareViaTagStore &&
+      this._activeVault &&
+      this._classifyForActiveVault(id) === "tombstone"
+    ) {
+      return this._createTombstone(id);
+    }
+    let record = await this._store.createRecord(id, this._collectionName);
     record.id = id;
-    record.collection = this.name;
+    record.collection = this._collectionName;
+    // Stamp the cleartext vault tag so the receiver can route the
+    // record to its tag store on apply.
+    if (this._vaultAwareViaTagStore && record.cleartext) {
+      const vault = this._vaultFor(id) || "personal";
+      record.cleartext.vault = vault;
+    }
     return record;
   },
 
   // Creates a tombstone Sync record with additional metadata.
   _createTombstone(id) {
-    let tombstone = new this._recordObj(this.name, id);
+    let tombstone = new this._recordObj(this._collectionName, id);
     tombstone.id = id;
-    tombstone.collection = this.name;
+    tombstone.collection = this._collectionName;
     tombstone.deleted = true;
     return tombstone;
   },
@@ -1468,7 +1665,9 @@ SyncEngine.prototype = {
   },
 
   async _maybeReconcile(item) {
-    let key = this.service.collectionKeys.keyForCollection(this.name);
+    let key = this.service.collectionKeys.keyForCollection(
+      this._collectionName
+    );
 
     // Grab a later last modified if possible
     if (this.lastModified == null || item.modified > this.lastModified) {
@@ -1488,7 +1687,9 @@ SyncEngine.prototype = {
           try {
             // Try decrypting again, typically because we've got new keys.
             this._log.info("Trying decrypt again...");
-            key = this.service.collectionKeys.keyForCollection(this.name);
+            key = this.service.collectionKeys.keyForCollection(
+              this._collectionName
+            );
             await item.decrypt(key);
             strategy = null;
           } catch (ex) {
@@ -1528,6 +1729,32 @@ SyncEngine.prototype = {
       this._log.trace("Deleting item from server without applying", item);
       await this._deleteId(item.id);
       return { shouldApply: false, error: null };
+    }
+
+    // Phase 2 Enterprise: capture the cleartext vault tag from the
+    // incoming record into the side-table so the engine's local
+    // store can stay vault-unaware. Receivers honor the active
+    // vault pass: if the active vault is "personal" the incoming
+    // BSO is by definition a personal record, regardless of what
+    // the sender stamped (a defence against forged cleartext).
+    if (
+      this._vaultAwareViaTagStore &&
+      this._activeVault &&
+      this.service.vaultTagStore
+    ) {
+      if (item.deleted) {
+        this.service.vaultTagStore.delete(this.name, item.id);
+      } else {
+        this.service.vaultTagStore.set(this.name, item.id, this._activeVault);
+        this.service.vaultTagStore.setLastSynced(
+          this.name,
+          item.id,
+          this._activeVault
+        );
+        // The receiver doesn't need to re-sync this record back: the
+        // tag we just wrote matches what's on the server.
+        this.service.vaultTagStore.clearDirty(this.name, item.id);
+      }
     }
 
     let shouldApply;
@@ -1937,7 +2164,7 @@ SyncEngine.prototype = {
             this._log.trace("Outgoing: " + out);
           }
           await out.encrypt(
-            this.service.collectionKeys.keyForCollection(this.name)
+            this.service.collectionKeys.keyForCollection(this._collectionName)
           );
           ok = true;
         } catch (ex) {
@@ -1982,9 +2209,34 @@ SyncEngine.prototype = {
     }
   },
 
-  async _onRecordsWritten() {
+  async _onRecordsWritten(successful /* , failed, lastModified */) {
     // Implement this method to take specific actions against successfully
     // uploaded records and failed records.
+    // Phase 2 Enterprise: for engines that route through the vault
+    // tag store, post-upload bookkeeping updates the tag-store's
+    // vaultLastSynced field. Regular uploads stamp the active vault;
+    // tombstone uploads clear the field (the new-vault pass will
+    // set it when it lands the fresh record).
+    if (
+      !this._vaultAwareViaTagStore ||
+      !this._activeVault ||
+      !this.service.vaultTagStore
+    ) {
+      return;
+    }
+    for (const id of successful || []) {
+      const cls = this._classifyForActiveVault(id);
+      if (cls === "tombstone") {
+        this.service.vaultTagStore.setLastSynced(this.name, id, "");
+      } else if (cls === "match") {
+        this.service.vaultTagStore.setLastSynced(
+          this.name,
+          id,
+          this._activeVault
+        );
+      }
+      this.service.vaultTagStore.clearDirty(this.name, id);
+    }
   },
 
   // Any cleanup necessary.
@@ -2064,7 +2316,9 @@ SyncEngine.prototype = {
     test.sort = "newest";
     test.full = true;
 
-    let key = this.service.collectionKeys.keyForCollection(this.name);
+    let key = this.service.collectionKeys.keyForCollection(
+      this._collectionName
+    );
 
     // Any failure fetching/decrypting will just result in false
     try {

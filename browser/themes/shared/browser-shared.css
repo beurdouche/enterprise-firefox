@@ -1300,6 +1300,15 @@ popupnotificationcontent {
   }
 }
 
+/* Phase 2 Enterprise vault routing. "Save in Enterprise" is injected
+   into the popupnotification footer between the dropmarker and the
+   "Save in Personal" primary button, so the layout becomes
+   [Not now ▾] [Save in Enterprise] [Save in Personal]. */
+.popup-notification-vault-enterprise-button {
+  /* Inherits .footer-button visuals from the toolkit footer styles. */
+  margin-inline: var(--space-small);
+}
+
 #tab-notification-deck {
   display: block;
 }

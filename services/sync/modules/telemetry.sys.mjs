@@ -56,6 +56,7 @@ const TOPICS = [
   "weave:engine:sync:applied",
   "weave:engine:sync:step",
   "weave:engine:sync:uploaded",
+  "weave:engine:sync:vault-transition",
   "weave:engine:validate:finish",
   "weave:engine:validate:error",
 
@@ -298,6 +299,23 @@ class EngineRecord {
     }
   }
 
+  /**
+   * Phase 2 enterprise: between the personal and enterprise vault
+   * passes within a single engine sync, drop the per-pass
+   * duplicate-detection guards that recordApplied / recordValidation
+   * use. Without this, the second pass trips false-positive
+   * "Incoming records applied multiple times" / "Multiple validations
+   * occurred" ERROR logs even though both passes succeed.
+   *
+   * Note: only the last vault pass's counts are retained on the
+   * EngineRecord; aggregating across passes is left for a follow-up
+   * that splits the EngineRecord per vault.
+   */
+  resetVaultPassState() {
+    this.incoming = undefined;
+    this.validation = undefined;
+  }
+
   recordApplied(counts) {
     if (this.incoming) {
       log.error(
@@ -521,6 +539,15 @@ export class SyncRecord {
       return;
     }
     this.currentEngine.recordApplied(counts);
+  }
+
+  onEngineVaultTransition(engineName) {
+    if (this._shouldIgnoreEngine(engineName, false)) {
+      return;
+    }
+    if (this.currentEngine && this.currentEngine.name === engineName) {
+      this.currentEngine.resetVaultPassState();
+    }
   }
 
   onEngineStep(engineName, step) {
@@ -1020,6 +1047,12 @@ class SyncTelemetryImpl {
       case "weave:engine:sync:applied":
         if (this._checkCurrent(topic)) {
           this.current.onEngineApplied(data, subject);
+        }
+        break;
+
+      case "weave:engine:sync:vault-transition":
+        if (this._checkCurrent(topic)) {
+          this.current.onEngineVaultTransition(data);
         }
         break;
 

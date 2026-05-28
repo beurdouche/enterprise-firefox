@@ -28,6 +28,9 @@ XPCOMUtils.defineLazyPreferenceGetter(
   "extensions.dataCollectionPermissions.enabled",
   false
 );
+ChromeUtils.defineESModuleGetters(lazy, {
+  VaultRouting: "resource://services-sync/VaultRouting.sys.mjs",
+});
 
 export class AddonDetails extends AboutAddonsHTMLElement {
   static get markup() {
@@ -87,6 +90,24 @@ export class AddonDetails extends AboutAddonsHTMLElement {
             </div>
             <div class="addon-detail-mlmodel">
               <addon-mlmodel-details></addon-mlmodel-details>
+            </div>
+            <div
+              class="addon-detail-row addon-detail-row-vault"
+              role="group"
+              data-l10n-id="addon-detail-group-label-vault"
+              hidden
+            >
+              <span data-l10n-id="addon-detail-vault-label"></span>
+              <div class="addon-detail-actions">
+                <label class="radio-container-with-text">
+                  <input type="radio" name="vault" value="personal" />
+                  <span data-l10n-id="addon-detail-vault-personal"></span>
+                </label>
+                <label class="radio-container-with-text">
+                  <input type="radio" name="vault" value="enterprise" />
+                  <span data-l10n-id="addon-detail-vault-enterprise"></span>
+                </label>
+              </div>
             </div>
             <div
               class="addon-detail-row addon-detail-row-updates"
@@ -406,6 +427,35 @@ export class AddonDetails extends AboutAddonsHTMLElement {
     let inputs = this.querySelectorAll(".addon-detail-row-updates input");
     for (let input of inputs) {
       input.checked = input.value == addon.applyBackgroundUpdates;
+    }
+
+    // Phase 2 Enterprise vault picker for the addon. Hidden unless
+    // vault routing is on.
+    let vaultRow = this.querySelector(".addon-detail-row-vault");
+    if (vaultRow) {
+      const visible = lazy.VaultRouting.isEnabled;
+      vaultRow.hidden = !visible;
+      if (visible) {
+        const current =
+          lazy.VaultRouting.getVault("addons", addon.id) || "personal";
+        const vaultInputs = vaultRow.querySelectorAll("input[name='vault']");
+        for (const input of vaultInputs) {
+          input.checked = input.value === current;
+          if (!input.dataset.vaultBound) {
+            input.dataset.vaultBound = "1";
+            /* eslint-disable mozilla/balanced-listeners */
+            input.addEventListener("change", () => {
+              if (input.checked) {
+                lazy.VaultRouting.setVault(
+                  "addons",
+                  this.addon.id,
+                  input.value
+                );
+              }
+            });
+          }
+        }
+      }
     }
   }
 

@@ -3776,6 +3776,19 @@ pref("services.common.log.logger.tokenserverclient", "Debug");
   pref("services.sync.lastversion", "firstrun");
   pref("services.sync.sendVersionInfo", true);
 
+  // Phase 2 Enterprise vault routing master switch. When true on a
+  // MOZ_ENTERPRISE build, Sync derives kSyncEnterprise + kSyncPersonal
+  // from FxA kB, splits sensitive engines into <engine>-personal /
+  // <engine>-enterprise collections, and exposes vault chrome in the
+  // save doorhangers, about:logins, about:addons, the bookmark edit
+  // panel, the places context menu, and about:preferences#privacy.
+  pref("services.sync.vault.routing.enabled", true);
+
+  // Maximum time the post-verification first sync will wait for the
+  // Felt SSO password to arrive via IPC before proceeding under the
+  // device-local fallback secret in FxAccountsKeys._deriveSyncKeyPersonal.
+  pref("services.sync.enterprise.ssoPasswordWaitMs", 30000);
+
   pref("services.sync.scheduler.idleInterval", 3600);  // 1 hour
   pref("services.sync.scheduler.activeInterval", 600);   // 10 minutes
   pref("services.sync.scheduler.immediateInterval", 90);    // 1.5 minutes

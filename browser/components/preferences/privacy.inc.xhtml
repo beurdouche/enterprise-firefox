@@ -533,6 +533,29 @@
   <label id="fips-desc" hidden="true" data-l10n-id="forms-master-pw-fips-desc"></label>
 </groupbox>
 
+<!-- Phase 2 Enterprise Vaults pane. Shown on MOZ_ENTERPRISE builds
+     when services.sync.vault.routing.enabled is true. Read-only
+     display of per-engine vault assignment; surfaces the
+     SyncPrivateEngines policy lock state. -->
+<groupbox id="vaultsGroup"
+          data-category="panePrivacy"
+          data-subcategory="vaults"
+          orient="vertical"
+          hidden="true">
+  <label><html:h2 data-l10n-id="pane-privacy-vaults-header"/></label>
+  <description class="indent tip-caption" data-l10n-id="pane-privacy-vaults-description"/>
+  <html:table id="vaultsTable" class="vaults-table">
+    <html:thead>
+      <html:tr>
+        <html:th data-l10n-id="pane-privacy-vaults-column-engine"/>
+        <html:th data-l10n-id="pane-privacy-vaults-column-vault"/>
+        <html:th data-l10n-id="pane-privacy-vaults-column-controlled-by"/>
+      </html:tr>
+    </html:thead>
+    <html:tbody id="vaultsTableBody"/>
+  </html:table>
+</groupbox>
+
 <html:setting-group groupid="passwords" hidden="true" data-category="panePrivacy" data-srd-migrated=""/>
 
 <html:setting-group data-category="panePrivacy" data-subcategory="payment-methods-autofill credit-card-autofill" groupid="payments" data-group="formAutofill" hidden="true" data-srd-migrated="" />

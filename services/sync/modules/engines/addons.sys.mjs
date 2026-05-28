@@ -128,6 +128,15 @@ AddonsEngine.prototype = {
 
   _reconciler: null,
 
+  // Phase 2 Enterprise vault routing via the JS-side tag store.
+  _vaultAwareViaTagStore: true,
+
+  async _sync() {
+    return SyncEngine.runVaultLoop(this, () =>
+      SyncEngine.prototype._sync.call(this)
+    );
+  },
+
   async initialize() {
     await SyncEngine.prototype.initialize.call(this);
     await this._reconciler.ensureStateLoaded();

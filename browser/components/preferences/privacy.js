@@ -712,6 +712,7 @@ var gPrivacyPane = {
     this._initRelayIntegrationUI();
     this._initMasterPasswordUI();
     this._initOSAuthentication();
+    this._initVaultsPane();
 
     // Init passwords settings group
     initSettingGroup("passwords");
@@ -1690,6 +1691,70 @@ var gPrivacyPane = {
    */
   _initMasterPasswordUI() {
     PasswordSettingHelpers._initMasterPasswordUI();
+  },
+
+  /**
+   * Phase 2 Enterprise Vaults pane. Read-only table that lists each
+   * sync engine and confirms per-record tagging is the source of
+   * truth. Hidden on non-MOZ_ENTERPRISE builds and when vault
+   * routing is disabled.
+   */
+  _initVaultsPane() {
+    const enabled =
+      AppConstants.MOZ_ENTERPRISE &&
+      Services.prefs.getBoolPref("services.sync.vault.routing.enabled", false);
+    const group = document.getElementById("vaultsGroup");
+    if (!group || !enabled) {
+      return;
+    }
+    group.hidden = false;
+
+    // All ten engines route per-record via the vault tag store
+    // (or via the inline tag on sensitive engines). The pane is
+    // read-only; per-record tagging happens in each engine's own
+    // UI (save doorhangers, about:logins, and per-engine surfaces
+    // landing in follow-ups). No admin policy override exists.
+    const entries = [
+      { id: "passwords", engineKey: "passwords" },
+      { id: "addresses", engineKey: "addresses" },
+      { id: "creditcards", engineKey: "creditcards" },
+      { id: "bookmarks", engineKey: "bookmarks" },
+      { id: "history", engineKey: "history" },
+      { id: "tabs", engineKey: "tabs" },
+      { id: "forms", engineKey: "forms" },
+      { id: "prefs", engineKey: "prefs" },
+      { id: "addons", engineKey: "addons" },
+      { id: "storage-sync", engineKey: "extension-storage" },
+    ];
+
+    const tbody = document.getElementById("vaultsTableBody");
+    tbody.replaceChildren();
+    for (const entry of entries) {
+      const row = document.createElement("tr");
+
+      const engineCell = document.createElement("td");
+      document.l10n.setAttributes(
+        engineCell,
+        `pane-privacy-vaults-engine-${entry.id}`
+      );
+      row.appendChild(engineCell);
+
+      const vaultCell = document.createElement("td");
+      document.l10n.setAttributes(
+        vaultCell,
+        "pane-privacy-vaults-tier-per-record"
+      );
+      row.appendChild(vaultCell);
+
+      const controlledByCell = document.createElement("td");
+      document.l10n.setAttributes(
+        controlledByCell,
+        "pane-privacy-vaults-controlled-by-user"
+      );
+      row.appendChild(controlledByCell);
+
+      tbody.appendChild(row);
+    }
   },
 
   /**

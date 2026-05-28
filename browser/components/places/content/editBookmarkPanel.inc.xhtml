@@ -113,4 +113,23 @@
   <div id="keyword-field-info"
        class="editBMPanel_keywordRow caption-label hideable"
        data-l10n-id="bookmark-overlay-keyword-caption-label-2"/>
+
+  <!-- Phase 2 Enterprise vault picker (MOZ_ENTERPRISE +
+       services.sync.vault.routing.enabled). Hidden by default;
+       editBookmark.js reveals and populates it. -->
+  <label id="editBMPanel_vaultLabel"
+         class="editBMPanel_vaultRow hideable"
+         data-l10n-id="bookmark-overlay-vault"
+         control="editBMPanel_vaultMenuList"
+         hidden="true"/>
+  <hbox class="editBMPanel_vaultRow hideable" hidden="true">
+    <menulist id="editBMPanel_vaultMenuList" flex="1">
+      <menupopup>
+        <menuitem value="personal"
+                  data-l10n-id="bookmark-overlay-vault-personal"/>
+        <menuitem value="enterprise"
+                  data-l10n-id="bookmark-overlay-vault-enterprise"/>
+      </menupopup>
+    </menulist>
+  </hbox>
 </div>

@@ -1611,6 +1611,30 @@ privacy-header = Browser Privacy
 pane-privacy-passwords-header = Passwords
     .searchkeywords = logins
 
+## Enterprise Vaults pane (MOZ_ENTERPRISE builds with vault routing
+## enabled). Read-only display of per-engine vault assignment.
+
+pane-privacy-vaults-header = Vaults
+pane-privacy-vaults-description = Choose where each kind of synced data is stored. Personal data is encrypted with a key only you can derive; Enterprise data can be recovered by your organization.
+pane-privacy-vaults-column-engine = Data
+pane-privacy-vaults-column-vault = Vault
+pane-privacy-vaults-column-controlled-by = Controlled by
+pane-privacy-vaults-engine-passwords = Passwords
+pane-privacy-vaults-engine-addresses = Addresses
+pane-privacy-vaults-engine-creditcards = Payment methods
+pane-privacy-vaults-engine-bookmarks = Bookmarks
+pane-privacy-vaults-engine-history = History
+pane-privacy-vaults-engine-tabs = Open tabs
+pane-privacy-vaults-engine-forms = Form history
+pane-privacy-vaults-engine-prefs = Settings
+pane-privacy-vaults-engine-addons = Add-ons
+pane-privacy-vaults-engine-storage-sync = Extension data
+pane-privacy-vaults-tier-personal = Personal
+pane-privacy-vaults-tier-enterprise = Enterprise
+pane-privacy-vaults-tier-per-record = Personal or Enterprise (per record)
+pane-privacy-vaults-controlled-by-user = You (per record)
+pane-privacy-vaults-controlled-by-policy = Your organization
+
 forms-passwords-header =
     .label = Passwords
     .aria-label = Passwords

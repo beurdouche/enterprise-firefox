@@ -95,6 +95,15 @@ PrefsEngine.prototype = {
   syncPriority: 1,
   allowSkippedRecord: false,
 
+  // Phase 2 Enterprise vault routing via the JS-side tag store.
+  _vaultAwareViaTagStore: true,
+
+  async _sync() {
+    return SyncEngine.runVaultLoop(this, () =>
+      SyncEngine.prototype._sync.call(this)
+    );
+  },
+
   async getChangedIDs() {
     // No need for a proper timestamp (no conflict resolution needed).
     let changedIDs = {};

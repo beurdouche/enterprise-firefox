@@ -7,11 +7,18 @@
  * the doorhager UI for formautofill related features.
  */
 
+import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
 import { FormAutofill } from "resource://autofill/FormAutofill.sys.mjs";
 import { FormAutofillUtils } from "resource://gre/modules/shared/FormAutofillUtils.sys.mjs";
 
 import { AutofillTelemetry } from "resource://gre/modules/shared/AutofillTelemetry.sys.mjs";
 import { showConfirmation } from "resource://gre/modules/FillHelpers.sys.mjs";
+
+// Phase 2 Enterprise vault routing. When this pref is true on an
+// MOZ_ENTERPRISE build, address + credit-card save doorhangers
+// expose a Personal/Enterprise picker and require a deliberate
+// selection before Save activates.
+const VAULT_ROUTING_PREF = "services.sync.vault.routing.enabled";
 
 const lazy = {};
 
@@ -67,6 +74,16 @@ export class AutofillDoorhanger {
     this.oldRecord = oldRecord ?? {};
     this.newRecord = newRecord;
     this.flowId = flowId;
+    // Phase 2 Enterprise vault state. When vault routing is on, the
+    // single Save button is replaced with "Save in Personal" + "Save
+    // in Enterprise" actions in #createActions(). Each button's
+    // callback stamps selectedVault before the doorhanger resolves;
+    // recordToSave() copies that onto newRecord.vault. Vault choice
+    // is entirely the user's — no admin policy override exists.
+    this.vaultRoutingEnabled =
+      AppConstants.MOZ_ENTERPRISE &&
+      Services.prefs.getBoolPref(VAULT_ROUTING_PREF, false);
+    this.selectedVault = "";
   }
 
   get ui() {
@@ -329,40 +346,126 @@ export class AutofillDoorhanger {
     const mainActionParams = this.ui.footer.mainAction;
     const secondaryActionParams = this.ui.footer.secondaryActions;
 
-    const callback = () => {
+    const makeSaveCallback = forVault => () => {
+      if (forVault === "personal" || forVault === "enterprise") {
+        this.selectedVault = forVault;
+      }
       AutofillTelemetry.recordDoorhangerClicked(
         this.constructor.telemetryType,
         mainActionParams.callbackState,
         this.constructor.telemetryObject,
         this.flowId
       );
-
       this.resolve(mainActionParams.callbackState);
     };
 
-    const mainAction = {
-      ...getLabelAndAccessKey(mainActionParams),
-      callback,
-    };
+    // Phase 2 Enterprise: when vault routing is on (save-time flow,
+    // not policy-locked), the in-content render method appends two
+    // equal-prominence "Save in Personal" / "Save in Enterprise"
+    // buttons; the framework button row degrades to Cancel-only.
+    // Each in-content button calls one of the makeSaveCallback
+    // variants below.
+    const showVaultButtons =
+      this.vaultRoutingEnabled && !Object.keys(this.oldRecord).length;
+    this._vaultSaveCallbacks = showVaultButtons
+      ? {
+          personal: makeSaveCallback("personal"),
+          enterprise: makeSaveCallback("enterprise"),
+        }
+      : null;
 
-    let secondaryActions = [];
-    for (const params of secondaryActionParams) {
-      secondaryActions.push({
-        ...getLabelAndAccessKey(params),
+    let mainAction;
+    if (showVaultButtons) {
+      // Use the first available cancel-style secondary as the
+      // framework's only visible button (typically "Not now").
+      const cancelParams = secondaryActionParams[0] || mainActionParams;
+      mainAction = {
+        ...getLabelAndAccessKey(cancelParams),
         callback: () => {
           AutofillTelemetry.recordDoorhangerClicked(
             this.constructor.telemetryType,
-            params.callbackState,
+            cancelParams.callbackState,
             this.constructor.telemetryObject,
             this.flowId
           );
-
-          this.resolve(params.callbackState);
+          this.resolve(cancelParams.callbackState);
         },
-      });
+      };
+    } else {
+      mainAction = {
+        ...getLabelAndAccessKey(mainActionParams),
+        callback: makeSaveCallback(""),
+      };
+    }
+
+    let secondaryActions = [];
+    if (!showVaultButtons) {
+      for (const params of secondaryActionParams) {
+        secondaryActions.push({
+          ...getLabelAndAccessKey(params),
+          callback: () => {
+            AutofillTelemetry.recordDoorhangerClicked(
+              this.constructor.telemetryType,
+              params.callbackState,
+              this.constructor.telemetryObject,
+              this.flowId
+            );
+
+            this.resolve(params.callbackState);
+          },
+        });
+      }
     }
 
     return [mainAction, secondaryActions];
+  }
+
+  /**
+   * Phase 2 Enterprise: render the two equal-prominence vault Save
+   * buttons inside the doorhanger's content area. Subclasses call
+   * this from renderContent() AFTER they've appended their main
+   * content. No-op when vault routing is off or when this is an
+   * update flow.
+   */
+  renderVaultSaveButtons() {
+    if (!this._vaultSaveCallbacks) {
+      return;
+    }
+    const row = this.doc.createElement("div");
+    row.className = "autofill-vault-save-actions";
+
+    const personalMsg = l10n.formatMessagesSync([
+      { id: "autofill-save-in-personal-button" },
+    ])[0];
+    const enterpriseMsg = l10n.formatMessagesSync([
+      { id: "autofill-save-in-enterprise-button" },
+    ])[0];
+    const labelOf = msg =>
+      msg.attributes.find(x => x.name == "label")?.value || "";
+
+    const buildBtn = (text, vault) => {
+      const btn = this.doc.createElement("button");
+      btn.type = "button";
+      btn.className = "autofill-vault-save-action";
+      btn.textContent = text;
+      /* eslint-disable mozilla/balanced-listeners */
+      btn.addEventListener("click", () => {
+        this._vaultSaveCallbacks[vault]();
+        try {
+          this.chromeWin.PopupNotifications.remove(
+            this.chromeWin.PopupNotifications.getNotification(
+              this.ui.id,
+              this.browser
+            )
+          );
+        } catch (e) {}
+      });
+      return btn;
+    };
+
+    row.appendChild(buildBtn(labelOf(personalMsg), "personal"));
+    row.appendChild(buildBtn(labelOf(enterpriseMsg), "enterprise"));
+    this.content.appendChild(row);
   }
 }
 
@@ -573,10 +676,18 @@ export class AddressSaveDoorhanger extends AutofillDoorhanger {
     linkContainer.className = "address-capture-edit-link-container";
     linkContainer.appendChild(link);
     this.content.appendChild(linkContainer);
+
+    this.renderVaultSaveButtons();
   }
 
   // The record to be saved by this doorhanger
   recordToSave() {
+    if (
+      this.selectedVault === "personal" ||
+      this.selectedVault === "enterprise"
+    ) {
+      this.newRecord.vault = this.selectedVault;
+    }
     return this.newRecord;
   }
 }
@@ -992,6 +1103,7 @@ export class CreditCardSaveDoorhanger extends AutofillDoorhanger {
     this.content.replaceChildren();
 
     this.appendDescription();
+    this.renderVaultSaveButtons();
   }
 
   onEventCallback(state) {
@@ -1006,6 +1118,12 @@ export class CreditCardSaveDoorhanger extends AutofillDoorhanger {
 
   // The record to be saved by this doorhanger
   recordToSave() {
+    if (
+      this.selectedVault === "personal" ||
+      this.selectedVault === "enterprise"
+    ) {
+      this.newRecord.vault = this.selectedVault;
+    }
     return this.newRecord;
   }
 }

@@ -163,3 +163,33 @@
     color: var(--text-color-deemphasized);
   }
 }
+
+/* Phase 2 Enterprise vault Save buttons in address + credit-card
+   save doorhangers. Two equal-prominence primaries side by side. */
+.autofill-vault-save-actions {
+  display: flex;
+  gap: var(--space-small);
+  margin-block-start: var(--space-large);
+}
+
+.autofill-vault-save-action {
+  flex: 1 1 0;
+  min-width: 0;
+  padding-block: var(--space-small);
+  padding-inline: var(--space-medium);
+  border-radius: var(--border-radius-small);
+  border: 1px solid transparent;
+  font-weight: 600;
+  cursor: pointer;
+  background-color: var(--button-background-color-primary, light-dark(rgb(0, 97, 224), rgb(0, 221, 255)));
+  color: var(--button-text-color-primary, light-dark(white, rgb(43, 42, 51)));
+}
+
+.autofill-vault-save-action:hover {
+  background-color: var(--button-background-color-primary-hover, light-dark(rgb(2, 80, 187), rgb(128, 235, 255)));
+}
+
+.autofill-vault-save-action:focus-visible {
+  outline: 2px solid var(--focus-outline-color, currentColor);
+  outline-offset: 2px;
+}

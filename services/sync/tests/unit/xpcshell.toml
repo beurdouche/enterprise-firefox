@@ -208,6 +208,12 @@ run-sequentially = ["true"] # Frequent timeouts, bug 1395148
 
 ["test_password_engine.js"]
 
+["test_autofill_record_vault_roundtrip.js"]
+
+["test_password_engine_vault_routing.js"]
+
+["test_vault_tag_store.js"]
+
 ["test_password_store.js"]
 
 ["test_password_tracker.js"]

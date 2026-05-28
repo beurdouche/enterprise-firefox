@@ -17,6 +17,16 @@ password-manager-save-password-button-never =
     .label = Never save
     .accesskey = e
 
+# Phase 2 Enterprise vault routing — the regular "Save" button is
+# replaced by these two when the build is MOZ_ENTERPRISE and vault
+# routing is enabled.
+password-manager-save-in-personal-button =
+    .label = Save in Personal
+    .accesskey = P
+password-manager-save-in-enterprise-button =
+    .label = Save in Enterprise
+    .accesskey = E
+
 # Variables
 #   $host (String) - Hostname for which the password is updated for.
 password-manager-update-password-message = Update password for { $host }?

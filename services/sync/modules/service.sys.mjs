@@ -4,6 +4,12 @@
 
 const CRYPTO_COLLECTION = "crypto";
 const KEYS_WBO = "keys";
+// Phase 2 Enterprise: a second BSO holding per-collection bundles for
+// enterprise-tier engines (bookmarks, history, …, plus the
+// `<engine>-enterprise` collections). Encrypted under the
+// kSyncEnterprise-derived bundle. The existing `crypto/keys` BSO is
+// the personal-tier BSO under Phase 1 routing.
+const KEYS_WBO_ENTERPRISE = "keys-enterprise";
 
 import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
 import { Log } from "resource://gre/modules/Log.sys.mjs";
@@ -57,6 +63,7 @@ import { Resource } from "resource://services-sync/resource.sys.mjs";
 import { EngineSynchronizer } from "resource://services-sync/stages/enginesync.sys.mjs";
 import { DeclinedEngines } from "resource://services-sync/stages/declined.sys.mjs";
 import { Status } from "resource://services-sync/status.sys.mjs";
+import { VaultTagStore } from "resource://services-sync/vault_tag_store.sys.mjs";
 
 ChromeUtils.importESModule("resource://services-sync/telemetry.sys.mjs");
 import { Svc, Utils } from "resource://services-sync/util.sys.mjs";
@@ -70,6 +77,10 @@ function getEngineModules() {
   let result = {
     Addons: { module: "addons.sys.mjs", symbol: "AddonsEngine" },
     Password: { module: "passwords.sys.mjs", symbol: "PasswordEngine" },
+    PersonalVaultRecovery: {
+      module: "personal_vault_recovery.sys.mjs",
+      symbol: "PersonalVaultRecoveryEngine",
+    },
     Prefs: { module: "prefs.sys.mjs", symbol: "PrefsEngine" },
   };
   if (AppConstants.MOZ_APP_NAME != "thunderbird") {
@@ -186,7 +197,8 @@ Sync11Service.prototype = {
       this.infoURL = undefined;
       this.storageURL = undefined;
       this.metaURL = undefined;
-      this.cryptoKeysURL = undefined;
+      this.cryptoPersonalKeysURL = undefined;
+      this.cryptoEnterpriseKeysURL = undefined;
       return;
     }
 
@@ -198,7 +210,12 @@ Sync11Service.prototype = {
     this.infoURL = this.userBaseURL + "info/collections";
     this.storageURL = this.userBaseURL + "storage/";
     this.metaURL = this.storageURL + "meta/global";
-    this.cryptoKeysURL = this.storageURL + CRYPTO_COLLECTION + "/" + KEYS_WBO;
+    this.cryptoPersonalKeysURL =
+      this.storageURL + CRYPTO_COLLECTION + "/" + KEYS_WBO;
+    // Phase 2 Enterprise: parallel BSO for enterprise-tier per-collection
+    // bundles. Encrypted under kSyncEnterprise.
+    this.cryptoEnterpriseKeysURL =
+      this.storageURL + CRYPTO_COLLECTION + "/" + KEYS_WBO_ENTERPRISE;
   },
 
   _checkCrypto: function _checkCrypto() {
@@ -263,7 +280,7 @@ Sync11Service.prototype = {
     let cryptoKeys = new CryptoWrapper(CRYPTO_COLLECTION, KEYS_WBO);
     try {
       let cryptoResp = (
-        await cryptoKeys.fetch(this.resource(this.cryptoKeysURL))
+        await cryptoKeys.fetch(this.resource(this.cryptoPersonalKeysURL))
       ).response;
 
       // Save out the ciphertext for when we reupload. If there's a bug in
@@ -275,8 +292,8 @@ Sync11Service.prototype = {
         return false;
       }
 
-      let keysChanged = await this.handleFetchedKeys(
-        this.identity.syncKeyBundle,
+      let keysChanged = await this.handleFetchedPersonalKeys(
+        this.identity.personalSyncKeyBundle,
         cryptoKeys,
         true
       );
@@ -314,7 +331,62 @@ Sync11Service.prototype = {
     }
   },
 
-  async handleFetchedKeys(syncKey, cryptoKeys, skipReset) {
+  /**
+   * Phase 2 Enterprise: best-effort fetch of `crypto/keys-enterprise`.
+   *
+   * Decrypts with the enterprise sync key bundle (kSyncEnterprise-derived)
+   * and installs the per-collection bundles in
+   * `collectionKeys._enterpriseCollections`. Returns true if the
+   * server returned a BSO and we successfully installed it, false on
+   * 404 / missing / non-Enterprise / decrypt failure. Never throws —
+   * a failure here should not block the rest of the sync.
+   */
+  async _tryFetchEnterpriseKeys() {
+    if (!AppConstants.MOZ_ENTERPRISE) {
+      return false;
+    }
+    const enterpriseBundle = this.identity.enterpriseSyncKeyBundle;
+    if (!enterpriseBundle) {
+      this._log.debug(
+        "No enterpriseSyncKeyBundle; skipping crypto/keys-enterprise"
+      );
+      return false;
+    }
+    if (!this.cryptoEnterpriseKeysURL) {
+      return false;
+    }
+    try {
+      const wbo = new CryptoWrapper(CRYPTO_COLLECTION, KEYS_WBO_ENTERPRISE);
+      const resp = (
+        await wbo.fetch(this.resource(this.cryptoEnterpriseKeysURL))
+      ).response;
+      if (!resp.success) {
+        if (resp.status == 404) {
+          this._log.info(
+            "crypto/keys-enterprise not on server yet — enterprise tier idle"
+          );
+        } else {
+          this._log.warn(
+            "Got status " +
+              resp.status +
+              " fetching crypto/keys-enterprise; enterprise tier degraded"
+          );
+        }
+        return false;
+      }
+      await this.collectionKeys.updateEnterpriseContents(enterpriseBundle, wbo);
+      this._log.info("Enterprise-tier collection keys installed");
+      return true;
+    } catch (ex) {
+      this._log.warn(
+        "Got exception fetching crypto/keys-enterprise; enterprise tier degraded: " +
+          ex
+      );
+      return false;
+    }
+  },
+
+  async handleFetchedPersonalKeys(syncKey, cryptoKeys, skipReset) {
     // Don't want to wipe if we're just starting up!
     let wasBlank = this.collectionKeys.isClear;
     let keysChanged = await this.collectionKeys.updateContents(
@@ -360,6 +432,17 @@ Sync11Service.prototype = {
     this._log.info("Loading Weave " + WEAVE_VERSION);
 
     this.recordManager = new RecordManager(this);
+
+    // Phase 2 Enterprise vault routing. Engines that don't carry the
+    // vault tag inline on their local records (bookmarks, history,
+    // tabs, forms, prefs, addons, storage.sync) read/write per-record
+    // vault metadata through this store.
+    this.vaultTagStore = new VaultTagStore();
+    try {
+      await this.vaultTagStore.load();
+    } catch (ex) {
+      this._log.warn("VaultTagStore load failed; continuing empty.", ex);
+    }
 
     this.enabled = true;
 
@@ -683,7 +766,7 @@ Sync11Service.prototype = {
       "Fetching and verifying -- or generating -- symmetric keys."
     );
 
-    let syncKeyBundle = this.identity.syncKeyBundle;
+    let syncKeyBundle = this.identity.personalSyncKeyBundle;
     if (!syncKeyBundle) {
       this.status.login = LOGIN_FAILED_NO_PASSPHRASE;
       this.status.sync = CREDENTIALS_CHANGED;
@@ -723,11 +806,19 @@ Sync11Service.prototype = {
           try {
             cryptoKeys = new CryptoWrapper(CRYPTO_COLLECTION, KEYS_WBO);
             let cryptoResp = (
-              await cryptoKeys.fetch(this.resource(this.cryptoKeysURL))
+              await cryptoKeys.fetch(this.resource(this.cryptoPersonalKeysURL))
             ).response;
 
             if (cryptoResp.success) {
-              await this.handleFetchedKeys(syncKeyBundle, cryptoKeys);
+              await this.handleFetchedPersonalKeys(syncKeyBundle, cryptoKeys);
+              // Phase 2 Enterprise: also fetch the parallel
+              // `crypto/keys-enterprise` BSO if available. Failure
+              // here is non-fatal — sync proceeds with personal-tier
+              // engines still working; only enterprise-tier engines
+              // are degraded (their key bundles won't be installed
+              // and `keyForCollection` will fall through to the
+              // personal default which won't decrypt them).
+              await this._tryFetchEnterpriseKeys();
               return true;
             } else if (cryptoResp.status == 404) {
               // On failure, ask to generate new keys and upload them.
@@ -852,7 +943,7 @@ Sync11Service.prototype = {
           // We have no way of verifying the passphrase right now,
           // so wait until remoteSetup to do so.
           // Just make the most trivial checks.
-          if (!this.identity.syncKeyBundle) {
+          if (!this.identity.personalSyncKeyBundle) {
             this._log.warn("No passphrase in verifyLogin.");
             this.status.login = LOGIN_FAILED_NO_PASSPHRASE;
             return false;
@@ -904,7 +995,7 @@ Sync11Service.prototype = {
     this._log.info("Generating new keys WBO...");
     let wbo = await this.collectionKeys.generateNewKeysWBO();
     this._log.info("Encrypting new key bundle.");
-    await wbo.encrypt(this.identity.syncKeyBundle);
+    await wbo.encrypt(this.identity.personalSyncKeyBundle);
 
     let uploadRes = await this._uploadCryptoKeys(wbo, 0);
     if (uploadRes.status != 200) {
@@ -952,14 +1043,15 @@ Sync11Service.prototype = {
 
     // Download and install them.
     let cryptoKeys = new CryptoWrapper(CRYPTO_COLLECTION, KEYS_WBO);
-    let cryptoResp = (await cryptoKeys.fetch(this.resource(this.cryptoKeysURL)))
-      .response;
+    let cryptoResp = (
+      await cryptoKeys.fetch(this.resource(this.cryptoPersonalKeysURL))
+    ).response;
     if (cryptoResp.status != 200) {
       this._log.warn("Failed to download keys.");
       throw new Error("Symmetric key download failed.");
     }
-    let keysChanged = await this.handleFetchedKeys(
-      this.identity.syncKeyBundle,
+    let keysChanged = await this.handleFetchedPersonalKeys(
+      this.identity.personalSyncKeyBundle,
       cryptoKeys,
       true
     );
@@ -1500,7 +1592,7 @@ Sync11Service.prototype = {
    */
   async _uploadCryptoKeys(cryptoKeys, lastModified) {
     this._log.debug(`Uploading crypto/keys (lastModified: ${lastModified})`);
-    let res = this.resource(this.cryptoKeysURL);
+    let res = this.resource(this.cryptoPersonalKeysURL);
     res.setHeader("X-If-Unmodified-Since", lastModified);
     return res.put(cryptoKeys);
   },

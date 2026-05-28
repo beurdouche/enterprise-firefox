@@ -71,6 +71,15 @@ ExtensionStorageEngineBridge.prototype = {
   // Used to override the engine name in telemetry, so that we can distinguish .
   overrideTelemetryName: "rust-webext-storage",
 
+  // Phase 2 Enterprise vault routing via the JS-side tag store.
+  _vaultAwareViaTagStore: true,
+
+  async _sync() {
+    return SyncEngine.runVaultLoop(this, () =>
+      BridgedEngine.prototype._sync.call(this)
+    );
+  },
+
   async initialize() {
     await SyncEngine.prototype.initialize.call(this);
     this._rustStore = await lazy.storageSyncService.getStorageAreaInstance();

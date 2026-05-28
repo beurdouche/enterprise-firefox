@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
 import { PrivateBrowsingUtils } from "resource://gre/modules/PrivateBrowsingUtils.sys.mjs";
 import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 import { showConfirmation } from "resource://gre/modules/FillHelpers.sys.mjs";
@@ -11,6 +12,12 @@ const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
   LoginHelper: "resource://gre/modules/LoginHelper.sys.mjs",
 });
+
+// Phase 2 Enterprise vault routing. When this pref is true on an
+// MOZ_ENTERPRISE build, the save/update password doorhanger exposes
+// the Personal/Enterprise vault picker and requires the user to
+// pick before Save activates.
+const VAULT_ROUTING_PREF = "services.sync.vault.routing.enabled";
 
 XPCOMUtils.defineLazyServiceGetter(
   lazy,
@@ -120,7 +127,22 @@ export class LoginManagerPrompter {
     possibleValues = undefined
   ) {
     lazy.log.debug("Prompting user to save login.");
-    const inPrivateBrowsing = PrivateBrowsingUtils.isBrowserPrivate(aBrowser);
+    // In MOZ_ENTERPRISE the post-SSO Firefox process runs every
+    // tab in Felt's privateBrowsingId=1 container so that the
+    // Felt UI process and the browsing process don't share state.
+    // The standard private-browsing check would then suppress the
+    // save doorhanger across the whole post-SSO product, which is
+    // the opposite of what vault routing needs. Override the check
+    // only when we're the spawned browsing Firefox — keep the
+    // suppression in the Felt UI process so SSO password entry is
+    // never offered for storage.
+    const inFeltBrowsing =
+      AppConstants.MOZ_ENTERPRISE &&
+      Services.felt &&
+      Services.felt.isFeltBrowser();
+    const inPrivateBrowsing = inFeltBrowsing
+      ? false
+      : PrivateBrowsingUtils.isBrowserPrivate(aBrowser);
     const notification = LoginManagerPrompter._showLoginCaptureDoorhanger(
       aBrowser,
       aLogin,
@@ -232,23 +254,54 @@ export class LoginManagerPrompter {
       did_select_pw: false,
     };
 
+    // Phase 2 Enterprise vault routing. On the save flow, the
+    // single Save button is replaced with two: "Save in Personal"
+    // and "Save in Enterprise". Vault selection is entirely the
+    // user's choice — no admin policy override exists.
+    const vaultRoutingEnabled =
+      AppConstants.MOZ_ENTERPRISE &&
+      Services.prefs.getBoolPref(VAULT_ROUTING_PREF, false) &&
+      type == "password-save";
+    // Holds the vault the user picked (which Save-in-X button they
+    // clicked) so persistData can stamp it onto the new login.
+    let selectedVault = "";
+
     const updateButtonStatus = element => {
       const mainActionButton = element.button;
-      // Disable the main button inside the menu-button if the password field is empty.
-      if (!login.password.length) {
+      const passwordEmpty = !login.password.length;
+      if (passwordEmpty) {
         mainActionButton.setAttribute("disabled", true);
-        chromeDoc
-          .getElementById("password-notification-password")
-          .classList.add("popup-notification-invalid-input");
       } else {
         mainActionButton.removeAttribute("disabled");
-        chromeDoc
-          .getElementById("password-notification-password")
-          .classList.remove("popup-notification-invalid-input");
+      }
+      const passwordField = chromeDoc.getElementById(
+        "password-notification-password"
+      );
+      if (passwordEmpty) {
+        passwordField.classList.add("popup-notification-invalid-input");
+      } else {
+        passwordField.classList.remove("popup-notification-invalid-input");
       }
     };
 
     const updateButtonLabel = async () => {
+      // Phase 2 Enterprise: with vault routing on, the framework
+      // main button is intentionally "Not now" (the cancel action)
+      // — the actual save happens via the two in-content buttons.
+      // Don't overwrite the framework button's Save-style label.
+      if (vaultRoutingEnabled) {
+        if (!currentNotification) {
+          return;
+        }
+        const element = [...currentNotification.owner.panel.childNodes].find(
+          n => n.notification == currentNotification
+        );
+        if (element) {
+          updateButtonStatus(element);
+        }
+        return;
+      }
+
       const foundLogins = await Services.logins.searchLoginsAsync({
         formActionOrigin: login.formActionOrigin,
         origin: login.origin,
@@ -404,17 +457,19 @@ export class LoginManagerPrompter {
         // Create a new login, don't update an original.
         // The original login we have been provided with might have its own
         // metadata, but we don't want it propagated to the newly created one.
-        await Services.logins.addLoginAsync(
-          new LoginInfo(
-            login.origin,
-            login.formActionOrigin,
-            login.httpRealm,
-            login.username,
-            login.password,
-            login.usernameField,
-            login.passwordField
-          )
+        const newLogin = new LoginInfo(
+          login.origin,
+          login.formActionOrigin,
+          login.httpRealm,
+          login.username,
+          login.password,
+          login.usernameField,
+          login.passwordField
         );
+        if (selectedVault === "personal" || selectedVault === "enterprise") {
+          newLogin.vault = selectedVault;
+        }
+        await Services.logins.addLoginAsync(newLogin);
       } else if (
         loginToUpdate.password == login.password &&
         loginToUpdate.username == login.username
@@ -445,90 +500,122 @@ export class LoginManagerPrompter {
       }
     };
 
-    const mainButton = this.getLabelAndAccessKey(initialMessageIds.mainButton);
+    // Save-action callback factory. When vault routing is enabled,
+    // each of the two Save-in-X buttons gets its own callback bound
+    // to a specific vault; otherwise a single Save button runs the
+    // callback with the locked or legacy vault.
+    const makeSaveCallback = forVault => async () => {
+      const eventTypeMapping = {
+        "password-save": {
+          eventObject: "Save",
+          confirmationHintFtlId: "confirmation-hint-password-created",
+        },
+        "password-change": {
+          eventObject: "Update",
+          confirmationHintFtlId: "confirmation-hint-password-updated",
+        },
+      };
 
-    // The main action is the "Save" or "Update" button.
-    const mainAction = {
-      label: mainButton.label,
-      accessKey: mainButton.accessKey,
-      callback: async () => {
-        const eventTypeMapping = {
-          "password-save": {
-            eventObject: "Save",
-            confirmationHintFtlId: "confirmation-hint-password-created",
-          },
-          "password-change": {
-            eventObject: "Update",
-            confirmationHintFtlId: "confirmation-hint-password-updated",
-          },
-        };
+      if (!eventTypeMapping[type]) {
+        throw new Error(`Unexpected doorhanger type: '${type}'`);
+      }
 
-        if (!eventTypeMapping[type]) {
-          throw new Error(`Unexpected doorhanger type: '${type}'`);
-        }
-
-        readDataFromUI();
-        if (
-          type == "password-save" &&
-          !Services.policies.isAllowed("removeMasterPassword")
-        ) {
+      readDataFromUI();
+      if (forVault === "personal" || forVault === "enterprise") {
+        selectedVault = forVault;
+      }
+      if (
+        type == "password-save" &&
+        !Services.policies.isAllowed("removeMasterPassword")
+      ) {
+        if (!lazy.LoginHelper.isPrimaryPasswordSet()) {
+          browser.documentGlobal.openDialog(
+            "chrome://mozapps/content/preferences/changemp.xhtml",
+            "",
+            "centerscreen,chrome,modal,titlebar"
+          );
           if (!lazy.LoginHelper.isPrimaryPasswordSet()) {
-            browser.documentGlobal.openDialog(
-              "chrome://mozapps/content/preferences/changemp.xhtml",
-              "",
-              "centerscreen,chrome,modal,titlebar"
-            );
-            if (!lazy.LoginHelper.isPrimaryPasswordSet()) {
-              return;
-            }
+            return;
           }
         }
-        histogramAdd(PROMPT_ADD_OR_UPDATE);
+      }
+      histogramAdd(PROMPT_ADD_OR_UPDATE);
 
-        showConfirmation(browser, eventTypeMapping[type].confirmationHintFtlId);
-        // The popup does not wait until this promise is resolved, but is
-        // closed immediately when the function is returned. Therefore, we set
-        // the focus before awaiting the asynchronous operation.
-        browser.focus();
-        await persistData();
+      showConfirmation(browser, eventTypeMapping[type].confirmationHintFtlId);
+      // The popup does not wait until this promise is resolved, but is
+      // closed immediately when the function is returned. Therefore, we set
+      // the focus before awaiting the asynchronous operation.
+      browser.focus();
+      await persistData();
 
-        Glean.pwmgr[
-          "doorhangerSubmitted" + eventTypeMapping[type].eventObject
-        ].record(wasModifiedEvent);
+      Glean.pwmgr[
+        "doorhangerSubmitted" + eventTypeMapping[type].eventObject
+      ].record(wasModifiedEvent);
 
-        if (histogramName == "PWMGR_PROMPT_REMEMBER_ACTION") {
-          Services.obs.notifyObservers(browser, "LoginStats:NewSavedPassword");
-        } else if (histogramName == "PWMGR_PROMPT_UPDATE_ACTION") {
-          Services.obs.notifyObservers(browser, "LoginStats:LoginUpdateSaved");
-        }
+      if (histogramName == "PWMGR_PROMPT_REMEMBER_ACTION") {
+        Services.obs.notifyObservers(browser, "LoginStats:NewSavedPassword");
+      } else if (histogramName == "PWMGR_PROMPT_UPDATE_ACTION") {
+        Services.obs.notifyObservers(browser, "LoginStats:LoginUpdateSaved");
+      }
 
-        Services.obs.notifyObservers(
-          null,
-          "weave:telemetry:histogram",
-          histogramName
-        );
-      },
+      Services.obs.notifyObservers(
+        null,
+        "weave:telemetry:histogram",
+        histogramName
+      );
     };
 
     const secondaryButton = this.getLabelAndAccessKey(
       initialMessageIds.secondaryButton
     );
-
-    const secondaryActions = [
-      {
-        label: secondaryButton.label,
-        accessKey: secondaryButton.accessKey,
-        callback: () => {
-          histogramAdd(PROMPT_NOTNOW_OR_DONTUPDATE);
-          Services.obs.notifyObservers(
-            null,
-            "weave:telemetry:histogram",
-            histogramName
-          );
-          browser.focus();
-        },
+    const cancelAction = {
+      label: secondaryButton.label,
+      accessKey: secondaryButton.accessKey,
+      callback: () => {
+        histogramAdd(PROMPT_NOTNOW_OR_DONTUPDATE);
+        Services.obs.notifyObservers(
+          null,
+          "weave:telemetry:histogram",
+          histogramName
+        );
+        browser.focus();
       },
-    ];
+    };
+
+    // When vault routing is on, the framework's primary action is
+    // "Save in Personal". "Save in Enterprise" is injected into
+    // the footer at `showing` time so it sits between the framework
+    // dropmarker chevron and the primary button.
+    let mainAction;
+    if (vaultRoutingEnabled) {
+      const saveInPersonal = this.getLabelAndAccessKey(
+        "password-manager-save-in-personal-button"
+      );
+      mainAction = {
+        label: saveInPersonal.label,
+        accessKey: saveInPersonal.accessKey,
+        callback: makeSaveCallback("personal"),
+      };
+    } else {
+      const mainButton = this.getLabelAndAccessKey(
+        initialMessageIds.mainButton
+      );
+      mainAction = {
+        label: mainButton.label,
+        accessKey: mainButton.accessKey,
+        callback: makeSaveCallback(""),
+      };
+    }
+
+    const secondaryActions = [];
+    // Phase 2 Enterprise: vault routing keeps the standard
+    // "Not now" + "Never save" pairing in the framework footer
+    // (secondary button + dropmarker chevron with "Never save"
+    // inside). "Save in Enterprise" is injected into the footer
+    // separately in the `showing` callback, between the dropmarker
+    // and the "Save in Personal" primary, so the final layout is
+    // [Not now ▾] [Save in Enterprise] [Save in Personal].
+    secondaryActions.push(cancelAction);
     // Include a "Never for this site" button when saving a new password.
     if (type == "password-save") {
       const neverSaveButton = this.getLabelAndAccessKey(
@@ -615,27 +702,28 @@ export class LoginManagerPrompter {
                   );
                 }
 
-                chromeDoc
-                  .getElementById("password-notification-password")
-                  .removeAttribute("focused");
-                chromeDoc
-                  .getElementById("password-notification-username")
-                  .removeAttribute("focused");
-                chromeDoc
-                  .getElementById("password-notification-username")
-                  .addEventListener("input", onUsernameInput);
-                chromeDoc
-                  .getElementById("password-notification-username")
-                  .addEventListener("keyup", onKeyUp);
-                chromeDoc
-                  .getElementById("password-notification-password")
-                  .addEventListener("keyup", onKeyUp);
-                chromeDoc
-                  .getElementById("password-notification-password")
-                  .addEventListener("input", onPasswordInput);
-                chromeDoc
-                  .getElementById("password-notification-username-dropmarker")
-                  .addEventListener("click", togglePopup);
+                const usernameInputEl = chromeDoc.getElementById(
+                  "password-notification-username"
+                );
+                const passwordInputEl = chromeDoc.getElementById(
+                  "password-notification-password"
+                );
+                const usernameDropmarkerEl = chromeDoc.getElementById(
+                  "password-notification-username-dropmarker"
+                );
+                if (passwordInputEl) {
+                  passwordInputEl.removeAttribute("focused");
+                  passwordInputEl.addEventListener("keyup", onKeyUp);
+                  passwordInputEl.addEventListener("input", onPasswordInput);
+                }
+                if (usernameInputEl) {
+                  usernameInputEl.removeAttribute("focused");
+                  usernameInputEl.addEventListener("input", onUsernameInput);
+                  usernameInputEl.addEventListener("keyup", onKeyUp);
+                }
+                if (usernameDropmarkerEl) {
+                  usernameDropmarkerEl.addEventListener("click", togglePopup);
+                }
 
                 LoginManagerPrompter._getUsernameSuggestions(
                   login,
@@ -677,6 +765,64 @@ export class LoginManagerPrompter {
                 anchorIcon.removeAttribute("extraAttr");
                 delete this.options.extraAttr;
               }
+              // Phase 2 Enterprise: inject the "Save in Enterprise"
+              // button into the popupnotification footer, between
+              // the dropmarker chevron and the "Save in Personal"
+              // primary button. PopupNotifications only renders
+              // three slots natively ([secondary] [dropmarker]
+              // [primary]); this DOM injection adds a fourth that
+              // looks like a peer footer-button. Done in `shown`
+              // (not `showing`) because the framework only invokes
+              // popupnotification.show() — which lazily slots the
+              // footer DOM — *after* the showing callback returns.
+              // Looking up `.panel-footer` from `showing` produces
+              // null on first render, causing the button to appear
+              // only on the second render (after a re-paint
+              // triggered by user input).
+              if (vaultRoutingEnabled && currentNotification) {
+                const notificationEl = [
+                  ...currentNotification.owner.panel.childNodes,
+                ].find(el => el.notification == currentNotification);
+                const footer =
+                  notificationEl &&
+                  notificationEl.querySelector(".panel-footer");
+                const primaryButton =
+                  footer &&
+                  footer.querySelector(
+                    ".popup-notification-primary-button"
+                  );
+                const alreadyInjected =
+                  footer &&
+                  footer.querySelector(
+                    ".popup-notification-vault-enterprise-button"
+                  );
+                if (footer && primaryButton && !alreadyInjected) {
+                  const saveInEnterprise =
+                    LoginManagerPrompter.getLabelAndAccessKey(
+                      "password-manager-save-in-enterprise-button"
+                    );
+                  const enterpriseBtn = chromeDoc.createXULElement("button");
+                  // Match the visual weight of the primary button so
+                  // "Save in Personal" and "Save in Enterprise" sit
+                  // as peers — both styled as primary footer buttons.
+                  enterpriseBtn.className =
+                    "popup-notification-vault-enterprise-button primary footer-button";
+                  enterpriseBtn.setAttribute("label", saveInEnterprise.label);
+                  if (saveInEnterprise.accessKey) {
+                    enterpriseBtn.setAttribute(
+                      "accesskey",
+                      saveInEnterprise.accessKey
+                    );
+                  }
+                  enterpriseBtn.addEventListener("command", async () => {
+                    await makeSaveCallback("enterprise")();
+                    try {
+                      currentNotification?.remove();
+                    } catch (e) {}
+                  });
+                  footer.insertBefore(enterpriseBtn, primaryButton);
+                }
+              }
               break;
             }
             case "dismissed":
@@ -692,16 +838,23 @@ export class LoginManagerPrompter {
               const usernameField = chromeDoc.getElementById(
                 "password-notification-username"
               );
-              usernameField.removeEventListener("input", onUsernameInput);
-              usernameField.removeEventListener("keyup", onKeyUp);
+              if (usernameField) {
+                usernameField.removeEventListener("input", onUsernameInput);
+                usernameField.removeEventListener("keyup", onKeyUp);
+              }
               const passwordField = chromeDoc.getElementById(
                 "password-notification-password"
               );
-              passwordField.removeEventListener("input", onPasswordInput);
-              passwordField.removeEventListener("keyup", onKeyUp);
-              chromeDoc
-                .getElementById("password-notification-username-dropmarker")
-                .removeEventListener("click", togglePopup);
+              if (passwordField) {
+                passwordField.removeEventListener("input", onPasswordInput);
+                passwordField.removeEventListener("keyup", onKeyUp);
+              }
+              const usernameDropmarker = chromeDoc.getElementById(
+                "password-notification-username-dropmarker"
+              );
+              if (usernameDropmarker) {
+                usernameDropmarker.removeEventListener("click", togglePopup);
+              }
               break;
             }
           }

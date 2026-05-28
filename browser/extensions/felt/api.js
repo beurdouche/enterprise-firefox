@@ -52,7 +52,13 @@ this.felt = class extends ExtensionAPI {
     const { ConsoleClient } = ChromeUtils.importESModule(
       "resource:///modules/enterprise/ConsoleClient.sys.mjs"
     );
-    const matches = [await ConsoleClient.ssoCallbackUriMatchPattern];
+    const matches = [
+      await ConsoleClient.ssoCallbackUriMatchPattern,
+      // Match the SSO login page too so FeltWindowChild can capture the
+      // password the user types and forward it to the parent process for
+      // use as an additional secret feeding NSS.
+      await ConsoleClient.ssoLoginUriMatchPattern,
+    ];
     ChromeUtils.registerWindowActor(this.FELT_WINDOW_ACTOR, {
       parent: {
         esModuleURI: "chrome://felt/content/FeltWindowParent.sys.mjs",

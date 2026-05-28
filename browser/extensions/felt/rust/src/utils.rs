@@ -64,6 +64,13 @@ pub static TOKENS: LazyLock<Arc<RwLock<Tokens>>> =
     LazyLock::new(|| Arc::new(RwLock::new(Default::default())));
 pub static CONSOLE_URL: OnceLock<Arc<String>> = OnceLock::new();
 
+// Captured SSO password. Set in the Felt UI process by FeltWindowChild
+// when the user submits the SSO login form; sent over IPC to the
+// spawned Firefox where BrowserGlue mixes it with the console-supplied
+// primarySecret before unlocking the NSS slot. Never persisted.
+pub static SSO_PASSWORD: LazyLock<Arc<RwLock<Option<String>>>> =
+    LazyLock::new(|| Arc::new(RwLock::new(None)));
+
 pub fn inject_one_cookie(cookie: nsICookieWrapper) {
     trace!("inject_one_cookie() cookie:{:?}", cookie.clone());
     trace!(

@@ -129,6 +129,41 @@ interface nsILockstore : nsISupports
                     in boolean extractable);
 
   /**
+   * Install caller-supplied raw bytes as a local KEK at `kekRef`.
+   * Used by the personal-vault recovery flow on a new device after
+   * deriving the bytes from a BIP-39 mnemonic. `kekRef` must start
+   * with `lockstore::kek::local:` and `kekBytes` must be 32 bytes
+   * (AES-256). Idempotent on matching bytes; rejects with
+   * `NS_ERROR_INVALID_ARG` if a row at `kekRef` already exists with
+   * different bytes.
+   */
+  [implicit_jscontext]
+  Promise importLocalKek(in AUTF8String kekRef,
+                         in Array<octet> kekBytes);
+
+  /**
+   * Return the serialized `WrappedDek` record for the
+   * `(collection, kekRef)` pair as opaque JSON bytes. The receiving
+   * device hands the bytes straight to `importWrappedDek` without
+   * inspecting them. Rejects with `NS_ERROR_NOT_AVAILABLE` if no
+   * wrapped DEK exists for that pair.
+   */
+  [implicit_jscontext]
+  Promise exportWrappedDek(in AUTF8String collection,
+                           in AUTF8String kekRef);
+
+  /**
+   * Install a foreign `WrappedDek` (produced by `exportWrappedDek`
+   * on another device) into the collection's DEK metadata. Creates
+   * fresh DEK metadata if none exists yet for `collection`; refreshes
+   * the existing entry if one is already keyed off `kekRef`.
+   */
+  [implicit_jscontext]
+  Promise importWrappedDek(in AUTF8String collection,
+                           in AUTF8String kekRef,
+                           in Array<octet> wrappedDekBytes);
+
+  /**
    * Resolves with `true` iff the DEK for `collection` was created
    * with `extractable = true`. Touches SQLite (loads the DEK metadata
    * row), hence async — distinct from `isKekUnlocked`, which is an

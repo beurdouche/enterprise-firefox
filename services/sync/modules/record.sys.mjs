@@ -442,6 +442,20 @@ export function CollectionKeyManager(lastModified, default_, collections) {
   this._default = default_ || null;
   this._collections = collections || {};
 
+  // Phase 2 (Enterprise) enterprise-tier bundles. Populated separately
+  // from a `crypto/keys-enterprise` BSO encrypted under
+  // kSyncEnterprise. The existing `_collections` map holds the
+  // personal-tier bundles fed from the existing `crypto/keys` BSO
+  // which Phase 1 routed through kSyncPersonal. `keyForCollection(name)`
+  // consults `_collections` first; if the collection isn't in either
+  // map it falls back to `_default`. Personal and enterprise
+  // collection names are disjoint by convention
+  // (`passwords-personal` vs `passwords-enterprise`, plus the
+  // per-engine-engine collections like `bookmarks` go in
+  // `_enterpriseCollections`), so there's no name collision.
+  this._enterpriseDefault = null;
+  this._enterpriseCollections = {};
+
   this._log = Log.repository.getLogger("Sync.CollectionKeyManager");
 }
 
@@ -501,14 +515,36 @@ CollectionKeyManager.prototype = {
     this.lastModified = 0;
     this._collections = {};
     this._default = null;
+    this._enterpriseCollections = {};
+    this._enterpriseDefault = null;
   },
 
   keyForCollection(collection) {
     if (collection && this._collections[collection]) {
       return this._collections[collection];
     }
-
+    // Phase 2 Enterprise-tier bundles. Disjoint collection names from
+    // the personal tier, so this is a strict name lookup, not a
+    // precedence question.
+    if (collection && this._enterpriseCollections[collection]) {
+      return this._enterpriseCollections[collection];
+    }
     return this._default;
+  },
+
+  /**
+   * Install Enterprise-tier collection bundles (Phase 2).
+   *
+   * Called by service.sys.mjs after successfully decrypting the
+   * `crypto/keys-enterprise` BSO with the kSyncEnterprise-derived
+   * bundle. `bundles` is
+   * `{ default: BulkKeyBundle | null, collections: { name: BulkKeyBundle } }`.
+   */
+  setEnterpriseContents(bundles) {
+    this._enterpriseDefault = bundles?.default || null;
+    this._enterpriseCollections = bundles?.collections
+      ? Object.assign({}, bundles.collections)
+      : {};
   },
 
   /**
@@ -744,6 +780,71 @@ CollectionKeyManager.prototype = {
     let r = this.setContents(payload, storage_keys.modified);
     log.info("Collection keys updated.");
     return r;
+  },
+
+  /**
+   * Phase 2 Enterprise: decrypt the `crypto/keys-enterprise` BSO with
+   * the enterprise-tier sync key bundle and install the resulting
+   * per-collection bundles in the enterprise map.
+   *
+   * Parallel to `updateContents` but feeds into `_enterpriseCollections`
+   * rather than `_collections`. Returns true on first install, false
+   * when contents are unchanged.
+   */
+  async updateEnterpriseContents(enterpriseSyncKeyBundle, storage_keys) {
+    let log = this._log;
+    log.info("Updating enterprise collection keys...");
+
+    let payload;
+    try {
+      payload = await storage_keys.decrypt(enterpriseSyncKeyBundle);
+    } catch (ex) {
+      log.warn(
+        "Got exception decrypting enterprise crypto/keys-enterprise: " + ex
+      );
+      throw ex;
+    }
+
+    if (!payload || !payload.default) {
+      throw new Error("No default key in crypto/keys-enterprise payload");
+    }
+
+    // Parse the default bundle.
+    let newDefault = new BulkKeyBundle(DEFAULT_KEYBUNDLE_NAME);
+    newDefault.keyPairB64 = payload.default;
+
+    // Parse per-collection bundles.
+    let newCollections = {};
+    if ("collections" in payload) {
+      for (let k in payload.collections) {
+        let v = payload.collections[k];
+        if (v) {
+          let bundle = new BulkKeyBundle(k);
+          bundle.keyPairB64 = v;
+          newCollections[k] = bundle;
+        }
+      }
+    }
+
+    // Detect a change relative to what we already had.
+    let sameDefault =
+      this._enterpriseDefault && this._enterpriseDefault.equals(newDefault);
+    let collComparison = this._compareKeyBundleCollections(
+      newCollections,
+      this._enterpriseCollections
+    );
+
+    this._enterpriseDefault = newDefault;
+    this._enterpriseCollections = newCollections;
+    log.info(
+      `Enterprise collection keys installed (default same? ${sameDefault}, ` +
+        `changed: ${JSON.stringify(collComparison.changed)})`
+    );
+
+    if (!sameDefault) {
+      return true;
+    }
+    return collComparison.changed.length ? collComparison.changed : false;
   },
 };
 

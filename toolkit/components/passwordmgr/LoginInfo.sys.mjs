@@ -27,6 +27,14 @@ nsLoginInfo.prototype = {
   passwordField: null,
   unknownFields: null,
 
+  // Enterprise vault tag: "personal" | "enterprise" | "" (legacy = "personal").
+  vault: "",
+  // The vault the record was last successfully synced under. Empty until
+  // the first per-vault sync pass uploads the record. Distinct from
+  // `vault` so PasswordEngine can detect re-tag events (vault changed
+  // since last sync) and emit a tombstone in the previous collection.
+  vaultLastSynced: "",
+
   everSynced: false,
   syncCounter: 0,
 
@@ -129,6 +137,10 @@ nsLoginInfo.prototype = {
 
     // Unknown fields from other clients
     clone.unknownFields = this.unknownFields;
+
+    // Enterprise vault tag (Phase 2+)
+    clone.vault = this.vault;
+    clone.vaultLastSynced = this.vaultLastSynced;
 
     return clone;
   },

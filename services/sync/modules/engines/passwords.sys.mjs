@@ -13,6 +13,16 @@ import {
   Tracker,
 } from "resource://services-sync/engines.sys.mjs";
 import { Svc, Utils } from "resource://services-sync/util.sys.mjs";
+import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
+
+// Phase 2 Enterprise vault routing. When this pref is true on an
+// MOZ_ENTERPRISE build, PasswordEngine runs two sync passes — one
+// against passwords-personal (encrypted under kSyncPersonal) and
+// one against passwords-enterprise (encrypted under kSyncEnterprise)
+// — filtering records by their stored vault tag. Default false so
+// existing deployments are unaffected until the rest of Phase 2
+// lands.
+const VAULT_ROUTING_PREF = "services.sync.vault.routing.enabled";
 
 // These are valid fields the server could have for a logins record
 // we mainly use this to detect if there are any unknownFields and
@@ -73,6 +83,13 @@ Utils.deferGetSet(LoginRec, "cleartext", [
   "passwordField",
   "timeCreated",
   "timePasswordChanged",
+  // Phase 2 Enterprise vault tag ("personal" or "enterprise").
+  // Travels with each record so receivers know which vault the login
+  // belongs to. The per-vault collection routing on the wire (which
+  // collection / which key bundle a record is encrypted under) is a
+  // separate engine-level concern; this field is the per-record
+  // metadata the engine consults.
+  "vault",
 ]);
 
 export function PasswordEngine(service) {
@@ -134,10 +151,34 @@ PasswordEngine.prototype = {
           continue;
         }
 
+        // Phase 2 Enterprise: when a vault pass is active, surface
+        // (a) records whose tag matches the active vault — normal
+        // upload — and (b) re-tag tombstones (records that have
+        // moved to the other vault since their last sync, leaving a
+        // stale BSO in the active vault's collection on the server).
+        // Records missing a vault tag (legacy / unset) read as
+        // "personal" so they stay in the safer tier by default.
+        let isRetagTombstone = false;
+        if (this._activeVault) {
+          const loginVault = login.vault || "personal";
+          const loginLastSynced = login.vaultLastSynced || "";
+          if (loginVault !== this._activeVault) {
+            if (loginLastSynced !== this._activeVault) {
+              continue;
+            }
+            // Stale BSO in this collection — emit a tombstone.
+            isRetagTombstone = true;
+          }
+        }
+
+        const deleted =
+          isRetagTombstone ||
+          (await this._store.storage.loginIsDeletedAsync(login.guid));
         changes[login.guid] = {
           counter: login.syncCounter, // record the initial counter value
           modified: roundTimeForSync(login.timePasswordChanged),
-          deleted: await this._store.storage.loginIsDeletedAsync(login.guid),
+          deleted,
+          retagTombstone: isRetagTombstone,
         };
       }
     }
@@ -145,13 +186,46 @@ PasswordEngine.prototype = {
     return changes;
   },
 
+  async _sync() {
+    if (
+      !AppConstants.MOZ_ENTERPRISE ||
+      !Services.prefs.getBoolPref(VAULT_ROUTING_PREF, false)
+    ) {
+      return SyncEngine.prototype._sync.call(this);
+    }
+
+    for (const vault of ["personal", "enterprise"]) {
+      this._activeVault = vault;
+      try {
+        await SyncEngine.prototype._sync.call(this);
+      } finally {
+        this._activeVault = null;
+      }
+    }
+    return undefined;
+  },
+
   async trackRemainingChanges() {
     // Reset the syncCounter on the items that were changed.
-    for (let [guid, { counter, synced }] of Object.entries(
+    for (let [guid, { counter, synced, retagTombstone }] of Object.entries(
       this._modified.changes
     )) {
-      if (synced) {
-        this._store.storage.resetSyncCounter(guid, counter);
+      if (!synced) {
+        continue;
+      }
+      if (retagTombstone) {
+        // The user's single edit produced two server operations
+        // (tombstone in the old vault, upload in the new vault).
+        // Don't consume the syncCounter here so the next vault
+        // pass still sees the record as dirty and uploads the
+        // fresh BSO. Clear the previous-vault marker — the
+        // current-vault pass will set it once that upload lands.
+        await this._store.storage.setVaultLastSynced(guid, "");
+        continue;
+      }
+      this._store.storage.resetSyncCounter(guid, counter);
+      if (this._activeVault) {
+        await this._store.storage.setVaultLastSynced(guid, this._activeVault);
       }
     }
   },
@@ -260,6 +334,13 @@ PasswordStore.prototype = {
 
     info.QueryInterface(Ci.nsILoginMetaInfo);
     info.guid = record.id;
+    // Phase 2 Enterprise vault tag. Records arriving without the
+    // field (legacy clients / Phase 2a default) read as "personal"
+    // so they keep the safer trust property.
+    info.vault =
+      record.vault === "enterprise" || record.vault === "personal"
+        ? record.vault
+        : "personal";
     if (record.timeCreated && !isNaN(new Date(record.timeCreated).getTime())) {
       info.timeCreated = record.timeCreated;
     }
@@ -351,6 +432,21 @@ PasswordStore.prototype = {
       return record;
     }
 
+    // Phase 2 Enterprise re-tag tombstone. If the engine is in a
+    // vault pass and the login moved out of this vault since its
+    // last successful sync, emit a tombstone in this collection so
+    // the stale BSO is deleted on the server. The current-vault
+    // pass will handle the new upload separately.
+    const activeVault = this.engine?._activeVault;
+    if (
+      activeVault &&
+      (login.vault || "personal") !== activeVault &&
+      (login.vaultLastSynced || "") === activeVault
+    ) {
+      record.deleted = true;
+      return record;
+    }
+
     record.hostname = login.origin;
     record.formSubmitURL = login.formActionOrigin;
     record.httpRealm = login.httpRealm;
@@ -358,6 +454,10 @@ PasswordStore.prototype = {
     record.password = login.password;
     record.usernameField = login.usernameField;
     record.passwordField = login.passwordField;
+    // Phase 2 Enterprise vault tag. Empty/missing reads as "personal"
+    // (the safer default) so legacy records sync into the personal
+    // tier.
+    record.vault = login.vault || "personal";
 
     // Optional fields.
     login.QueryInterface(Ci.nsILoginMetaInfo);

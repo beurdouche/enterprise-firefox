@@ -77,6 +77,11 @@ export default class LoginItem extends HTMLElement {
     );
     this._favicon = this.shadowRoot.querySelector(".login-item-favicon");
     this._title = this.shadowRoot.querySelector(".login-item-title");
+    this._vaultChip = this.shadowRoot.querySelector(".login-item-vault-chip");
+    this._vaultRow = this.shadowRoot.querySelector(".login-item-vault-row");
+    this._vaultSelect = this.shadowRoot.querySelector(
+      ".login-item-vault-select"
+    );
     this._breachAlert = this.shadowRoot.querySelector("login-breach-alert");
     this._vulnerableAlert = this.shadowRoot.querySelector(
       "login-vulnerable-password-alert"
@@ -272,6 +277,31 @@ export default class LoginItem extends HTMLElement {
     this._updateOriginDisplayState();
     this.#updateTimeline();
     this.#updatePasswordMessage();
+    this.#updateVaultUI();
+  }
+
+  #updateVaultUI() {
+    const enabled =
+      window.AboutLoginsUtils &&
+      window.AboutLoginsUtils.vaultRoutingEnabled === true;
+    if (!enabled) {
+      this._vaultChip.hidden = true;
+      this._vaultRow.hidden = true;
+      return;
+    }
+    const vault =
+      this._login.vault === "enterprise" || this._login.vault === "personal"
+        ? this._login.vault
+        : "personal";
+    document.l10n.setAttributes(
+      this._vaultChip,
+      `about-logins-login-item-vault-chip-${vault}`
+    );
+    // Chip is informational outside edit mode; hide when editing
+    // because the select below takes over.
+    this._vaultChip.hidden = !!this.dataset.editing;
+    this._vaultRow.hidden = !this.dataset.editing;
+    this._vaultSelect.value = vault;
   }
 
   #updateTimeline() {
@@ -918,12 +948,21 @@ export default class LoginItem extends HTMLElement {
   }
 
   _loginFromForm() {
-    return Object.assign({}, this._login, {
+    const update = {
       username: this._usernameInput.value.trim(),
       password: this._passwordInput.value,
       origin:
         window.AboutLoginsUtils.getLoginOrigin(this._originInput.value) || "",
-    });
+    };
+    if (
+      window.AboutLoginsUtils &&
+      window.AboutLoginsUtils.vaultRoutingEnabled === true &&
+      this._vaultSelect &&
+      this._vaultSelect.value
+    ) {
+      update.vault = this._vaultSelect.value;
+    }
+    return Object.assign({}, this._login, update);
   }
 
   _recordTelemetryEvent(eventObject) {
