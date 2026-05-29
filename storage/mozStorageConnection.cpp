@@ -22,7 +22,7 @@
 #include "mozilla/ErrorNames.h"
 #include "mozilla/dom/quota/QuotaObject.h"
 #include "mozilla/ScopeExit.h"
-#include "mozilla/security/KeyStorage.h"
+#include "mozilla/storage/SQLiteEncryption.h"
 #include "mozilla/SpinEventLoopUntil.h"
 #include "mozilla/StaticPrefs_security.h"
 #include "mozilla/StaticPrefs_storage.h"
@@ -1130,21 +1130,36 @@ nsresult Connection::initialize(nsIFile* aDatabaseFile) {
   nsresult rv = aDatabaseFile->GetPath(path);
   NS_ENSURE_SUCCESS(rv, rv);
 
-  // Open through obfsvfs with a per-file key when encryption is on and
-  // the DB lives inside the profile. Outside-profile DBs (xpcshell tmp
-  // files) get NS_ERROR_NOT_AVAILABLE from the keystore and fall through
-  // to a plain open.
+  // Open through obfsvfs with a per-file key when encryption is on and the DB
+  // lives inside the profile. Outside-profile DBs (e.g. xpcshell tmp files)
+  // are explicitly opened as plaintext on the base VFS below.
   if (StaticPrefs::security_storage_encryption_sqlite_enabled()) {
-    if (!EnsureNSSInitializedChromeOrContent()) {
-      return NS_ERROR_FAILURE;
-    }
+    nsAutoCString dbPath = NS_ConvertUTF16toUTF8(path);
+    EncryptionStatus encStatus;
+    rv = GetDatabaseEncryptionStatus(dbPath, encStatus);
+    NS_ENSURE_SUCCESS(rv, rv);
 
-    nsCString dbKey;
-    rv = key::GetKeyByFile(*aDatabaseFile, dbKey);
-    if (rv == NS_OK) {
+    bool exists = false;
+    aDatabaseFile->Exists(&exists);
+    const bool readOnly = mFlags & SQLITE_OPEN_READONLY;
+
+    // A read-only open of a database that does not exist has nothing to
+    // decrypt and cannot mint a key; fall through to the base open, which
+    // fails with the natural file error rather than a key-lookup failure.
+    if (encStatus == EncryptionStatus::Encrypted && !(readOnly && !exists)) {
+      if (!EnsureNSSInitializedChromeOrContent()) {
+        return NS_ERROR_FAILURE;
+      }
+
+      OpenIntent intent =
+          exists ? OpenIntent::LoadExisting : OpenIntent::CreateIfNew;
+
+      nsCString dbKey;
+      rv = GetEncryptionKey(dbPath, intent, dbKey);
+      NS_ENSURE_SUCCESS(rv, rv);
+
       SetDatabaseEncrypted(true);
 
-      nsAutoCString dbPath = NS_ConvertUTF16toUTF8(path);
       PreparePathForURI(dbPath);
       nsAutoCString dbSpec = "file:"_ns + dbPath + "?key="_ns + dbKey;
 
@@ -1163,9 +1178,9 @@ nsresult Connection::initialize(nsIFile* aDatabaseFile) {
       RecordOpenStatus(rv);
       NS_ENSURE_SUCCESS(rv, rv);
       return NS_OK;
-    } else if (rv != NS_ERROR_NOT_AVAILABLE) {
-      return rv;
     }
+    // Plaintext (out-of-profile), or a read-only open of a missing database:
+    // fall through to the base-VFS open below.
   }
 
   bool exclusive =
@@ -1259,18 +1274,37 @@ nsresult Connection::initialize(nsIFileURL* aFileURL) {
                        }));
 
   if (StaticPrefs::security_storage_encryption_sqlite_enabled()) {
-    if (!EnsureNSSInitializedChromeOrContent()) {
-      return NS_ERROR_FAILURE;
-    }
     // A key already in the URL means the caller is opening an encrypted DB
-    // with its own key, so trust it. Otherwise look up the per-file key; a
-    // DB outside the profile has no stable key (GetKeyByFile returns
-    // NS_ERROR_NOT_AVAILABLE -- not only test temp files, but any DB opened
-    // from outside the profile) and stays unencrypted on the base VFS.
+    // with its own key, so trust it. Otherwise look up the per-file key for
+    // in-profile databases; databases outside the profile have no stable key
+    // and stay unencrypted on the base VFS.
     if (!hasKey) {
-      nsCString dbKey;
-      rv = key::GetKeyByFile(*mDatabaseFile, dbKey);
-      if (rv != NS_ERROR_NOT_AVAILABLE) {
+      nsAutoString dbPathUtf16;
+      rv = mDatabaseFile->GetPath(dbPathUtf16);
+      NS_ENSURE_SUCCESS(rv, rv);
+      nsAutoCString dbPath = NS_ConvertUTF16toUTF8(dbPathUtf16);
+
+      EncryptionStatus encStatus;
+      rv = GetDatabaseEncryptionStatus(dbPath, encStatus);
+      NS_ENSURE_SUCCESS(rv, rv);
+
+      bool exists = false;
+      mDatabaseFile->Exists(&exists);
+      const bool readOnly = mFlags & SQLITE_OPEN_READONLY;
+
+      // A read-only open of a database that does not exist has nothing to
+      // decrypt and cannot mint a key; leave it unencrypted so the base open
+      // fails with the natural file error rather than a key-lookup failure.
+      if (encStatus == EncryptionStatus::Encrypted && !(readOnly && !exists)) {
+        if (!EnsureNSSInitializedChromeOrContent()) {
+          return NS_ERROR_FAILURE;
+        }
+
+        OpenIntent intent =
+            exists ? OpenIntent::LoadExisting : OpenIntent::CreateIfNew;
+
+        nsCString dbKey;
+        rv = GetEncryptionKey(dbPath, intent, dbKey);
         NS_ENSURE_SUCCESS(rv, rv);
         spec += (query.IsEmpty() ? "?key="_ns : "&key="_ns) + dbKey;
         hasKey = true;
@@ -2084,15 +2118,28 @@ nsresult Connection::initializeClone(Connection* aClone, bool aReadOnly) {
           NS_ENSURE_SUCCESS(rv, rv);
 
           if (mDatabaseEncrypted) {
-            nsCString aDBKey, query;
-            rv = ExtractURIPathAndQuery(path.get(), path, query);
+            // Extract into a distinct dbPath: BuildFileURIWithKey must not
+            // alias its input and output. It assigns "file:" to the output
+            // first and then appends the input path, so passing the same
+            // string for both clobbers the path and yields "file:file:?key="
+            // -- a malformed URI that fails the ATTACH and the whole clone.
+            nsCString dbKey, query, dbPath;
+            rv = ExtractURIPathAndQuery(path.get(), dbPath, query);
             NS_ENSURE_SUCCESS(rv, rv);
 
-            rv = key::GetKeyByPath(path.get(), aDBKey);
+            EncryptionStatus encStatus;
+            rv = GetDatabaseEncryptionStatus(dbPath, encStatus);
             NS_ENSURE_SUCCESS(rv, rv);
 
-            PreparePathForURI(path);
-            BuildFileURIWithKey(path, query, aDBKey, path);
+            // An out-of-profile attached DB stays unencrypted (path left as
+            // is). In-profile attached DBs always pre-exist, so load the DEK.
+            if (encStatus == EncryptionStatus::Encrypted) {
+              rv = GetEncryptionKey(dbPath, OpenIntent::LoadExisting, dbKey);
+              NS_ENSURE_SUCCESS(rv, rv);
+
+              PreparePathForURI(dbPath);
+              BuildFileURIWithKey(dbPath, query, dbKey, path);
+            }
           }
           rv = attachStmt->BindUTF8StringByName("path"_ns, path);
           NS_ENSURE_SUCCESS(rv, rv);
@@ -2730,11 +2777,21 @@ Connection::AttachDatabase(const char* aPath, const char* aName,
     rv = ExtractURIPathAndQuery(aPath, path, query);
     NS_ENSURE_SUCCESS(rv, rv);
 
-    rv = key::GetKeyByPath(path.get(), dbKey);
+    EncryptionStatus encStatus;
+    rv = GetDatabaseEncryptionStatus(path, encStatus);
     NS_ENSURE_SUCCESS(rv, rv);
 
-    PreparePathForURI(path);
-    BuildFileURIWithKey(path, query, dbKey, uri);
+    if (encStatus == EncryptionStatus::Encrypted) {
+      // Attach targets always pre-exist, so load the DEK (never create one).
+      rv = GetEncryptionKey(path, OpenIntent::LoadExisting, dbKey);
+      NS_ENSURE_SUCCESS(rv, rv);
+
+      PreparePathForURI(path);
+      BuildFileURIWithKey(path, query, dbKey, uri);
+    } else {
+      // Outside-profile DB; attach it unencrypted.
+      uri = aPath;
+    }
   } else {
     uri = aPath;
   }
