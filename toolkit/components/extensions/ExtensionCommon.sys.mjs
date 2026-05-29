@@ -69,10 +69,10 @@ function runSafeSyncWithoutClone(f, ...args) {
     // access to a BaseContext instance and so we can't check if `e`
     // is an instance of the extension context's Error constructor
     // (like we do in BaseContext applySafeWithoutClone method).
-    dump(
+    Cu.reportError(
       `Extension error: ${e} ${e?.fileName} ${
         e?.lineNumber
-      }\n[[Exception stack\n${e?.stack}Current stack\n${Error().stack}]]\n`
+      }\n[[Exception stack\n${e?.stack}Current stack\n${Error().stack}]]`
     );
     Cu.reportError(e);
   }
@@ -653,7 +653,7 @@ export class BaseContext {
         args = args.map(arg => Cu.cloneInto(arg, cloneScope));
       } catch (e) {
         Cu.reportError(e);
-        dump(
+        Cu.reportError(
           `runSafe failure: cloning into ${this.cloneScope}: ${e}\n\n${Error().stack}`
         );
       }
@@ -2756,9 +2756,9 @@ class EventManager {
 
     let shouldFire = () => {
       if (this.context.unloaded) {
-        dump(`${this.name} event fired after context unloaded.\n`);
+        Cu.reportError(`${this.name} event fired after context unloaded.`);
       } else if (!this.context.active) {
-        dump(`${this.name} event fired while context is inactive.\n`);
+        Cu.reportError(`${this.name} event fired while context is inactive.`);
       } else if (this.unregister.has(callback)) {
         return true;
       }

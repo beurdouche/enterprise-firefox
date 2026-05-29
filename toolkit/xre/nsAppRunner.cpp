@@ -31,6 +31,7 @@
 #include "mozilla/SpinEventLoopUntil.h"
 #include "mozilla/StaticPrefs_browser.h"
 #include "mozilla/StaticPrefs_fission.h"
+#include "mozilla/StaticPrefs_security.h"
 #include "mozilla/StaticPrefs_widget.h"
 #include "mozilla/glean/SecuritySandboxMetrics.h"
 #include "mozilla/Telemetry.h"
@@ -1300,6 +1301,11 @@ nsXULAppInfo::GetRemoteType(nsACString& aRemoteType) {
 constinit static nsCString gLastAppVersion;
 constinit static nsCString gLastAppBuildID;
 
+// Whether the loaded profile's compatibility.ini carries EncryptedDatabases=1.
+// Populated by CheckCompatibility() (which already parses compatibility.ini)
+// and consulted by the encryption-compatibility gate in XRE_mainStartup.
+static bool gProfileEncryptedDatabases = false;
+
 NS_IMETHODIMP
 nsXULAppInfo::GetLastAppVersion(nsACString& aResult) {
   if (XRE_IsContentProcess()) {
@@ -1521,6 +1527,48 @@ nsXULAppInfo::InvalidateCachesOnRestart() {
     PR_Write(fd, kInvalidationHeader, sizeof(kInvalidationHeader) - 1);
     PR_Close(fd);
   }
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+nsXULAppInfo::MarkProfileEncryptedDatabases() {
+  // Append the EncryptedDatabases marker to compatibility.ini (modeled on
+  // InvalidateCachesOnRestart above). Read back by CheckCompatibility() on the
+  // next startup so the encryption gate can refuse to launch a build whose
+  // pref disagrees with the now-encrypted profile. Append-only: the marker is
+  // never removed (a profile that has held encrypted databases stays marked).
+  nsCOMPtr<nsIFile> file;
+  nsresult rv =
+      NS_GetSpecialDirectory(NS_APP_PROFILE_DIR_STARTUP, getter_AddRefs(file));
+  if (NS_FAILED(rv)) return rv;
+  if (!file) return NS_ERROR_NOT_AVAILABLE;
+
+  file->AppendNative(FILE_COMPATIBILITY_INFO);
+
+  nsINIParser parser;
+  rv = parser.Init(file);
+  if (NS_FAILED(rv)) {
+    // No compatibility.ini yet (WriteVersion creates it once per profile);
+    // the marker will be written on a later startup.
+    return NS_OK;
+  }
+
+  nsAutoCString buf;
+  rv = parser.GetString("Compatibility", "EncryptedDatabases", buf);
+  if (NS_SUCCEEDED(rv)) {
+    // Already marked.
+    return NS_OK;
+  }
+
+  PRFileDesc* fd;
+  rv = file->OpenNSPRFileDesc(PR_RDWR | PR_APPEND, 0600, &fd);
+  if (NS_FAILED(rv)) {
+    return NS_ERROR_NOT_AVAILABLE;
+  }
+  static const char kEncryptedHeader[] =
+      NS_LINEBREAK "EncryptedDatabases=1" NS_LINEBREAK;
+  PR_Write(fd, kEncryptedHeader, sizeof(kEncryptedHeader) - 1);
+  PR_Close(fd);
   return NS_OK;
 }
 
@@ -2792,6 +2840,70 @@ static nsresult ProfileMissingDialog(nsINativeAppSupport* aNative) {
 #endif  // MOZ_WIDGET_ANDROID
 }
 
+// Shows the "encryption pref vs on-disk state" mismatch dialog and
+// returns NS_ERROR_ABORT so the caller can exit cleanly. aMsgKey /
+// aTitleKey select which of the two scenarios (encrypted-but-pref-off
+// or pref-on-but-plaintext) is being reported.
+static nsresult ProfileEncryptionMismatchDialog(const char* aMsgKey,
+                                                const char* aTitleKey,
+                                                nsINativeAppSupport* aNative) {
+#ifdef MOZ_WIDGET_ANDROID
+  Output(true, "Profile encryption state does not match launching build.\n");
+  return NS_ERROR_ABORT;
+#else
+#  ifdef MOZ_BACKGROUNDTASKS
+  if (BackgroundTasks::IsBackgroundTaskMode()) {
+    printf_stderr(
+        "Profile encryption state does not match launching build in "
+        "backgroundtask mode\n");
+    return NS_ERROR_ABORT;
+  }
+#  endif  // MOZ_BACKGROUNDTASKS
+
+  nsresult rv;
+
+  ScopedXPCOMStartup xpcom;
+  rv = xpcom.Initialize();
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  rv = xpcom.SetWindowCreator(aNative);
+  NS_ENSURE_SUCCESS(rv, NS_ERROR_FAILURE);
+
+#  ifdef XP_MACOSX
+  InitializeMacApp();
+#  endif
+
+  {  // extra scoping is needed so we release these components before xpcom
+     // shutdown
+    nsCOMPtr<nsIStringBundleService> sbs =
+        mozilla::components::StringBundle::Service();
+    NS_ENSURE_TRUE(sbs, NS_ERROR_FAILURE);
+
+    nsCOMPtr<nsIStringBundle> sb;
+    sbs->CreateBundle(kProfileProperties, getter_AddRefs(sb));
+    NS_ENSURE_TRUE_LOG(sb, NS_ERROR_FAILURE);
+
+    NS_ConvertUTF8toUTF16 appName(gAppData->name);
+    AutoTArray<nsString, 3> params = {appName, appName, appName};
+
+    nsAutoString msg;
+    rv = sb->FormatStringFromName(aMsgKey, params, msg);
+    NS_ENSURE_SUCCESS(rv, NS_ERROR_ABORT);
+
+    nsAutoString title;
+    params.SetLength(1);
+    rv = sb->FormatStringFromName(aTitleKey, params, title);
+    NS_ENSURE_SUCCESS(rv, NS_ERROR_ABORT);
+
+    nsCOMPtr<nsIPromptService> ps(do_GetService(NS_PROMPTSERVICE_CONTRACTID));
+    NS_ENSURE_TRUE(ps, NS_ERROR_FAILURE);
+
+    ps->Alert(nullptr, title.get(), msg.get());
+    return NS_ERROR_ABORT;
+  }
+#endif  // MOZ_WIDGET_ANDROID
+}
+
 static ReturnAbortOnError ProfileLockedDialog(nsIFile* aProfileDir,
                                               nsIFile* aProfileLocalDir,
                                               nsIProfileUnlocker* aUnlocker,
@@ -3650,6 +3762,7 @@ static bool CheckCompatibility(nsIFile* aProfileDir, const nsCString& aVersion,
   *aIsDowngrade = false;
   gLastAppVersion.SetIsVoid(true);
   gLastAppBuildID.SetIsVoid(true);
+  gProfileEncryptedDatabases = false;
 
   nsCOMPtr<nsIFile> file;
   aProfileDir->Clone(getter_AddRefs(file));
@@ -3659,6 +3772,17 @@ static bool CheckCompatibility(nsIFile* aProfileDir, const nsCString& aVersion,
   nsINIParser parser;
   nsresult rv = parser.Init(file);
   if (NS_FAILED(rv)) return false;
+
+  // The EncryptedDatabases marker is independent of version compatibility, so
+  // read it here -- compatibility.ini is already parsed -- before the early
+  // returns below. Consumed by the encryption gate in XRE_mainStartup.
+  {
+    nsAutoCString encBuf;
+    gProfileEncryptedDatabases =
+        NS_SUCCEEDED(
+            parser.GetString("Compatibility", "EncryptedDatabases", encBuf)) &&
+        encBuf.EqualsLiteral("1");
+  }
 
   rv = parser.GetString("Compatibility", "LastVersion", aLastVersion);
   if (NS_FAILED(rv)) {
@@ -3782,6 +3906,81 @@ static void WriteVersion(nsIFile* aProfileDir, const nsCString& aVersion,
   PR_Write(fd, kNL, sizeof(kNL) - 1);
 
   PR_Close(fd);
+}
+
+// Read the first 24 bytes of the first existing canonical app DB and
+// classify its encryption state by header inspection. No SQLite, no
+// mozStorage -- a pure file read. Returns NoDBs if none of the canonical
+// DBs exist in the profile.
+enum class DBHeaderResult { Encrypted, Plaintext, NoDBs };
+
+static DBHeaderResult DetectEncryptedDBHeader(nsIFile* aProfileDir) {
+  // Canonical DB list: any one of these existing is evidence of a
+  // non-fresh profile. Order matters for cheapness only.
+  static const char* const kCandidates[] = {
+      "cookies.sqlite", "places.sqlite",   "permissions.sqlite",
+      "storage.sqlite", "favicons.sqlite",
+  };
+
+  for (const char* name : kCandidates) {
+    nsCOMPtr<nsIFile> file;
+    if (NS_FAILED(aProfileDir->Clone(getter_AddRefs(file))) || !file) continue;
+    if (NS_FAILED(file->AppendNative(nsDependentCString(name)))) continue;
+
+    bool exists = false;
+    if (NS_FAILED(file->Exists(&exists)) || !exists) continue;
+
+    PRFileDesc* fd = nullptr;
+    if (NS_FAILED(file->OpenNSPRFileDesc(PR_RDONLY, 0, &fd)) || !fd) continue;
+
+    uint8_t hdr[24];
+    int32_t got = PR_Read(fd, hdr, sizeof(hdr));
+    PR_Close(fd);
+    if (got < 21) continue;
+
+    // SQLite header layout: bytes 16-17 page size (big-endian),
+    // byte 20 reserved-space-per-page.
+    uint16_t pageSize = (uint16_t(hdr[16]) << 8) | uint16_t(hdr[17]);
+    uint8_t reserved = hdr[20];
+
+    // obfsvfs invariants: 8192-byte pages with 32 reserved bytes.
+    if (pageSize == 0x2000 && reserved == 0x20) {
+      return DBHeaderResult::Encrypted;
+    }
+    return DBHeaderResult::Plaintext;
+  }
+  return DBHeaderResult::NoDBs;
+}
+
+enum class EncryptionCompatResult {
+  OK,
+  RefuseEncryptedButPrefOff,
+  RefuseMigrationRequired,
+};
+
+// Decide whether the on-disk state and the launching build's encryption
+// pref are compatible. Must be called after CheckCompatibility() has run
+// (it populates gProfileEncryptedDatabases). aPrefEnabled is the current
+// value of security.storage.encryption.sqlite.enabled.
+static EncryptionCompatResult CheckEncryptionCompatibility(nsIFile* aProfileDir,
+                                                           bool aPrefEnabled) {
+  // Marker says encrypted, pref says off -> data inaccessible. Refuse.
+  if (gProfileEncryptedDatabases && !aPrefEnabled) {
+    return EncryptionCompatResult::RefuseEncryptedButPrefOff;
+  }
+
+  // Marker absent (or =0), pref on. Disambiguate by header inspection:
+  // - empty profile or already-encrypted DBs -> OK (the marker is
+  //   (re)written by the storage layer on profile-after-change).
+  // - plaintext DBs present -> refuse, migration required.
+  if (!gProfileEncryptedDatabases && aPrefEnabled) {
+    DBHeaderResult h = DetectEncryptedDBHeader(aProfileDir);
+    if (h == DBHeaderResult::Plaintext) {
+      return EncryptionCompatResult::RefuseMigrationRequired;
+    }
+  }
+
+  return EncryptionCompatResult::OK;
 }
 
 /**
@@ -5539,6 +5738,35 @@ int XREMain::XRE_mainStartup(bool* aExitFlag,
 
   MOZ_RELEASE_ASSERT(!cachesOK || lastVersion.Equals(version),
                      "Caches cannot be good if the version has changed.");
+
+  // Refuse to launch if the profile's on-disk encryption state and the
+  // launching build's pref disagree: silently opening encrypted DBs with
+  // the wrong VFS (or plaintext DBs as ciphertext) would corrupt them.
+  // This must run before any storage code. Skip in backgroundtask mode:
+  // those tasks operate on profile files independently of any SQLite
+  // consumer and must succeed regardless of the gate.
+#ifdef MOZ_BACKGROUNDTASKS
+  if (!BackgroundTasks::IsBackgroundTaskMode())
+#endif
+  {
+    bool prefEnabled =
+        StaticPrefs::security_storage_encryption_sqlite_enabled();
+    EncryptionCompatResult ec =
+        CheckEncryptionCompatibility(mProfD, prefEnabled);
+    if (ec != EncryptionCompatResult::OK) {
+      const char* msgKey =
+          ec == EncryptionCompatResult::RefuseEncryptedButPrefOff
+              ? "profileEncryptedButPrefOff"
+              : "profileNotEncryptedButPrefOn";
+      const char* titleKey =
+          ec == EncryptionCompatResult::RefuseEncryptedButPrefOff
+              ? "profileEncryptedButPrefOffTitle"
+              : "profileNotEncryptedButPrefOnTitle";
+      (void)ProfileEncryptionMismatchDialog(msgKey, titleKey, mNativeApp);
+      *aExitFlag = true;
+      return 0;
+    }
+  }
 
 #ifdef MOZ_BLOCK_PROFILE_DOWNGRADE
   // The argument check must come first so the argument is always removed from
