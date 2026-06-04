@@ -108,6 +108,43 @@ interface nsIFelt : nsISupports {
   [must_use]
   void clearCapturedSSOPassword();
 
+  /**
+   * Store the console-supplied primarySecret on the Felt UI process
+   * after it's fetched via ConsoleClient.getPrimarySecret(). Held in
+   * memory only; never logged.
+   */
+  [must_use]
+  void setPrimarySecret(in ACString hex);
+
+  /**
+   * Push the previously-set primarySecret to the spawned Firefox over
+   * the existing Felt IPC channel. Must be invoked BEFORE the spawned
+   * Firefox initializes mozStorage encryption (i.e. before
+   * `sendReady()` / `firefoxReady=true`), so the storage layer can
+   * unlock its Password KEK at `profile-do-change` without racing the
+   * first cookies.sqlite open.
+   */
+  [must_use]
+  void sendPrimarySecret();
+
+  /**
+   * In the spawned Firefox: read the primarySecret previously
+   * received over IPC. Returns the empty string if none has arrived
+   * yet. Non-consuming — `storage/SQLiteEncryption.cpp` uses this
+   * synchronously on every database open + on KEK re-unlock after
+   * cache expiry, so it must remain readable for the lifetime of the
+   * session. Cleared explicitly via `clearPrimarySecret` on logout.
+   */
+  [must_use]
+  ACString peekPrimarySecret();
+
+  /**
+   * In the spawned Firefox: zero the primarySecret slot. Call on
+   * logout / sign-out so subsequent readers see an empty value.
+   */
+  [must_use]
+  void clearPrimarySecret();
+
   [must_use]
   void sendExtensionReady();
 

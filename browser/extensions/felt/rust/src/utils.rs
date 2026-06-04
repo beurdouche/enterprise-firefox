@@ -71,6 +71,14 @@ pub static CONSOLE_URL: OnceLock<Arc<String>> = OnceLock::new();
 pub static SSO_PASSWORD: LazyLock<Arc<RwLock<Option<String>>>> =
     LazyLock::new(|| Arc::new(RwLock::new(None)));
 
+// Console-supplied primarySecret (hex). Set in the Felt UI process via
+// ConsoleClient.getPrimarySecret(), sent over IPC to the spawned
+// Firefox where storage/SQLiteEncryption.cpp uses it to unlock the
+// `lockstore::kek::password:sqlite` Password KEK at profile-do-change.
+// Held in memory only; cleared on logout. Never persisted.
+pub static PRIMARY_SECRET: LazyLock<Arc<RwLock<Option<String>>>> =
+    LazyLock::new(|| Arc::new(RwLock::new(None)));
+
 pub fn inject_one_cookie(cookie: nsICookieWrapper) {
     trace!("inject_one_cookie() cookie:{:?}", cookie.clone());
     trace!(

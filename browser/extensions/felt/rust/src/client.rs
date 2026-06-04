@@ -13,7 +13,7 @@ use xpcom::RefPtr;
 use log::trace;
 
 use crate::message::{nsICookieWrapper, FeltMessage, FELT_IPC_VERSION};
-use crate::utils::{self, Tokens, SSO_PASSWORD, TOKENS};
+use crate::utils::{self, Tokens, PRIMARY_SECRET, SSO_PASSWORD, TOKENS};
 
 #[derive(Default)]
 pub struct FeltIpcClient {
@@ -401,6 +401,17 @@ impl FeltClientThread {
                                         utils::notify_observers("felt-firefox-sso-password-received".to_string());
                                     } else {
                                         trace!("FeltClientThread::felt_client::ipc_loop(): ERROR storing SSO password");
+                                    }
+                                }
+                                Ok(FeltMessage::PrimarySecret(hex)) => {
+                                    // Stash for storage/SQLiteEncryption.cpp to read at
+                                    // profile-do-change. Do NOT trace the value.
+                                    if let Ok(mut g) = PRIMARY_SECRET.write() {
+                                        *g = Some(hex);
+                                        trace!("FeltClientThread::felt_client::ipc_loop(): PrimarySecret received");
+                                        utils::notify_observers("felt-firefox-primary-secret-received".to_string());
+                                    } else {
+                                        trace!("FeltClientThread::felt_client::ipc_loop(): ERROR storing PrimarySecret");
                                     }
                                 }
                                 Ok(FeltMessage::Shutdown) => {

@@ -22,7 +22,7 @@ use log::{error, trace};
 use crate::message::{FeltMessage, FELT_IPC_VERSION};
 #[cfg(target_os = "linux")]
 use crate::utils;
-use crate::utils::{Tokens, CONSOLE_URL, SSO_PASSWORD, TOKENS, TOKEN_EXPIRY_SKEW};
+use crate::utils::{Tokens, CONSOLE_URL, PRIMARY_SECRET, SSO_PASSWORD, TOKENS, TOKEN_EXPIRY_SKEW};
 
 #[xpcom(implement(nsIFelt), atomic)]
 pub struct FeltXPCOM {
@@ -296,6 +296,68 @@ impl FeltXPCOM {
     // Zero the captured stretched-password slot. Call on logout.
     fn ClearCapturedSSOPassword(&self) -> nserror::nsresult {
         match SSO_PASSWORD.write() {
+            Ok(mut g) => {
+                *g = None;
+                NS_OK
+            }
+            Err(_) => NS_ERROR_FAILURE,
+        }
+    }
+
+    // Store the console-supplied primarySecret (hex) on the Felt UI
+    // process side. In-memory only; never logged.
+    fn SetPrimarySecret(&self, hex: *const nsACString) -> nserror::nsresult {
+        let hex_s = unsafe { (*hex).to_string() };
+        trace!("FeltXPCOM::SetPrimarySecret(): storing (len={})", hex_s.len());
+        match PRIMARY_SECRET.write() {
+            Ok(mut g) => {
+                *g = Some(hex_s);
+                NS_OK
+            }
+            Err(_) => NS_ERROR_FAILURE,
+        }
+    }
+
+    // Push the previously-set primarySecret to the spawned Firefox
+    // over the existing Felt IPC channel. Mirrors SendAccessToken /
+    // SendSSOPassword.
+    fn SendPrimarySecret(&self) -> nserror::nsresult {
+        if self.is_felt_browser {
+            trace!("FeltXPCOM::SendPrimarySecret: called from the browser, no-op");
+            return NS_OK;
+        }
+        match PRIMARY_SECRET.read() {
+            Ok(g) => match g.as_ref() {
+                Some(p) => self.send(FeltMessage::PrimarySecret(p.clone())),
+                None => {
+                    trace!("FeltXPCOM::SendPrimarySecret: no primarySecret set");
+                    NS_OK
+                }
+            },
+            Err(_) => NS_ERROR_FAILURE,
+        }
+    }
+
+    // In the spawned Firefox: read the primarySecret previously
+    // received over IPC. Returns the empty string if none. The
+    // storage encryption layer polls this synchronously during
+    // profile-do-change with a short timeout, so the slot must be
+    // readable as soon as the Felt IPC channel has stashed an
+    // incoming PrimarySecret message.
+    fn PeekPrimarySecret(&self, hex: *mut nsACString) -> nserror::nsresult {
+        match PRIMARY_SECRET.read() {
+            Ok(g) => {
+                let ps = g.as_deref().unwrap_or("");
+                unsafe { (*hex).assign(ps) };
+                NS_OK
+            }
+            Err(_) => NS_ERROR_FAILURE,
+        }
+    }
+
+    // Zero the primarySecret slot. Call on logout / sign-out.
+    fn ClearPrimarySecret(&self) -> nserror::nsresult {
+        match PRIMARY_SECRET.write() {
             Ok(mut g) => {
                 *g = None;
                 NS_OK

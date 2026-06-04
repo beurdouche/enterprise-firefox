@@ -476,9 +476,34 @@ export class FeltProcessParent extends JSProcessActorParent {
       gObserversRegistered = true;
     }
 
+    // Pre-fetch primarySecret from the console BEFORE spawning Firefox
+    // so the child's storage encryption layer (mozStorage / obfsvfs)
+    // can unlock its `lockstore::kek::password:sqlite` Password KEK at
+    // profile-do-change without racing the first cookies.sqlite open.
+    // Best-effort: if the call fails (no console reachable, expired
+    // token), we still spawn Firefox; the child times out waiting for
+    // PrimarySecret and the encryption gate refuses launch via the
+    // existing CheckEncryptionCompatibility path.
+    try {
+      const payload = await lazy.ConsoleClient.getPrimarySecret();
+      if (payload?.data) {
+        Services.felt.setPrimarySecret(payload.data);
+      } else {
+        lazy.log.warn("startFirefox: getPrimarySecret() returned no data");
+      }
+    } catch (e) {
+      lazy.log.warn(`startFirefox: getPrimarySecret() failed: ${e}`);
+    }
+
     this.firefox = this.startFirefoxProcess();
     this.firefox
       .then(async () => {
+        // Send primarySecret FIRST, before any other state, so the
+        // child's storage encryption KEK is unlocked before any
+        // mozStorage consumer opens a database. This bypasses the
+        // `firefoxReady=true` gate that sendAccessToken / sendReady
+        // wait for.
+        Services.felt.sendPrimarySecret();
         await this.sendPrefsToFirefox();
         Services.felt.sendAccessToken();
 
