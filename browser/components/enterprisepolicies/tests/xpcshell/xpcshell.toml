@@ -29,6 +29,8 @@ support-files = [
 
 ["test_empty_policy.js"]
 
+["test_enterprise_storage_encryption_contract_resolves.js"]
+
 ["test_enterprise_storage_encryption_contracts.js"]
 
 ["test_enterprise_storage_encryption_unlock.js"]
