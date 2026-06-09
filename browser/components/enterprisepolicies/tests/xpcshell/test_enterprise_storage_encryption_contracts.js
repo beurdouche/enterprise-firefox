@@ -12,6 +12,12 @@
 // If this test starts failing, the enterprise transparent primary-password
 // unlock task is broken at startup and users will see the primary-password
 // prompt instead of the SDR being silently unlocked.
+//
+// These guards are intentionally ungated (no run-if = ["enterprise"]): they
+// assert core-NSS contract resolution and that BrowserGlue references no
+// removed contract, which must hold in every build -- including the default
+// non-enterprise CI configuration, which is exactly where the original
+// regression shipped green. Gating them would re-create that blind spot.
 
 add_task(function test_legacy_pk11tokendb_contract_is_gone() {
   Assert.equal(
@@ -89,4 +95,45 @@ add_task(async function test_browserglue_does_not_reference_dead_contract() {
     body.includes("nsIPKCS11Token"),
     "The unlock task body must use the nsIPKCS11Token interface."
   );
+});
+
+add_task(async function test_every_referenced_contract_resolves() {
+  // Generalized companion to the string-match guard above: instead of pinning
+  // the task to the literal "internalkeytoken", assert that EVERY XPCOM
+  // contract id the task names via a Cc["@..."] literal actually resolves in
+  // this build. This is rename-proof and catches the exact failure mode of
+  // the original bug -- a reference to a removed or misspelled contract.
+  const { BrowserGlue } = ChromeUtils.importESModule(
+    "resource:///modules/BrowserGlue.sys.mjs"
+  );
+
+  // Matches Cc["@mozilla.org/...;1"] / Cc['...'] literals, capturing the
+  // contract id. Only string-literal lookups are in scope; a computed
+  // Cc[variable] can't be resolved statically.
+  const contractRe = /Cc\[\s*(["'])(@[^"']+)\1\s*\]/g;
+
+  const body =
+    BrowserGlue.prototype._runEnterpriseStorageEncryptionLoad.toString();
+  const contractIds = [...body.matchAll(contractRe)].map(match => match[2]);
+
+  Assert.greater(
+    contractIds.length,
+    0,
+    "The unlock task must reference at least one XPCOM contract via a " +
+      "Cc[...] string literal. A zero count means the regex no longer " +
+      "matches the task body -- update this guard rather than letting it " +
+      "pass vacuously."
+  );
+
+  for (const id of contractIds) {
+    Assert.notStrictEqual(
+      Cc[id],
+      undefined,
+      `Contract ${id}, referenced by _runEnterpriseStorageEncryptionLoad, ` +
+        `must resolve in this build. An undefined entry here is exactly the ` +
+        `nsIPK11TokenDB-style dead-contract regression this guard exists to ` +
+        `catch: at runtime the task would throw on .getService/.createInstance ` +
+        `and the primary-password unlock would silently fail.`
+    );
+  }
 });

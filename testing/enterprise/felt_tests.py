@@ -27,6 +27,11 @@ from marionette_driver.by import By
 from marionette_driver.geckoinstance import DesktopInstance, GeckoInstance
 from mozprofile.prefs import Preferences
 
+# Primary secret served by the mock console at /api/browser/key and consumed by
+# ConsoleClient.getPrimarySecret(). Defined once so the value served here and
+# the value asserted by the storage-encryption marionette test cannot drift.
+PRIMARY_SECRET = "test-enterprise-primary-secret-7f3a9c"
+
 
 class SharedString:
     """Process-safe string backed by shared memory.
@@ -284,6 +289,14 @@ class ConsoleHttpHandler(LocalHttpRequestHandler):
                 "updated_at": "2025-11-14T14:27:23.602803Z",
                 "policy_roles_id": None,
             })
+            contentType = "application/json"
+
+        elif path == "/api/browser/key":
+            if not self.check_auth():
+                return
+
+            # ConsoleClient.getPrimarySecret() expects { "data": "<secret>" }.
+            m = json.dumps({"data": PRIMARY_SECRET})
             contentType = "application/json"
 
         elif path == "/api/browser/forced_updates_count":

@@ -29,8 +29,9 @@ support-files = [
 
 ["test_empty_policy.js"]
 
-["test_enterprise_storage_encryption_contract_resolves.js"]
-
+# Ungated on purpose: this guard asserts core-NSS contract resolution and that
+# BrowserGlue references no removed contract, so it must run in every config --
+# including default non-enterprise CI, where the original regression hid.
 ["test_enterprise_storage_encryption_contracts.js"]
 
 ["test_enterprise_storage_encryption_unlock.js"]

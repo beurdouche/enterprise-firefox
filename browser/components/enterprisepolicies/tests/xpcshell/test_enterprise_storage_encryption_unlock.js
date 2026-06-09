@@ -11,8 +11,12 @@
 //   - The named method exists and is callable from JS.
 //   - ConsoleClient.getPrimarySecret() can be driven by the mock
 //     EnterprisePolicyTesting backend (registerPrimarySecret helper).
-//   - The task resolves without throwing to the caller during the
-//     first-run/empty-password flow.
+//   - The task resolves without throwing to the caller in the
+//     empty-password (changePassword) branch. The method now has only two
+//     branches -- empty-password/changePassword and existing-password/
+//     checkPassword; there is no longer a needsUserInit/initPassword
+//     first-run branch, since NSS startup already PK11_InitPin's the
+//     internal token (removed per Bug 2040374 review).
 //   - When the token already has PRIMARY_SECRET set and is logged out,
 //     the existing-password/checkPassword path also runs without
 //     throwing back to the caller.

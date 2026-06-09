@@ -60,6 +60,8 @@ run-if = [
 
 ["test_felt_browser_starts_utf8.py"]
 
+["test_felt_browser_storage_encryption.py"]
+
 ["test_felt_browser_token_refresh.py"]
 
 ["test_felt_browser_updater_errors.py"]
