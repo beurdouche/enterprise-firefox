@@ -16,6 +16,7 @@
 #include "mozilla/TimeStamp.h"
 #include "mozilla/dom/quota/IPCStreamCipherStrategy.h"
 #include "mozilla/security/lockstore/lockstore_ffi_generated.h"
+#include "mozilla/storage/SQLiteMigration.h"
 #if defined(MOZ_ENTERPRISE)
 #  include "mozilla/toolkit/components/felt/felt.h"
 #endif
@@ -35,6 +36,7 @@
 #include "nsString.h"
 #include "nsTArray.h"
 #include "nsThreadUtils.h"
+#include "nsXULAppAPI.h"
 
 namespace mozilla::storage {
 
@@ -49,6 +51,7 @@ using mozilla::security::lockstore::keystore_add_kek;
 using mozilla::security::lockstore::keystore_close;
 using mozilla::security::lockstore::keystore_create_dek;
 using mozilla::security::lockstore::keystore_create_kek;
+using mozilla::security::lockstore::keystore_delete_dek;
 using mozilla::security::lockstore::keystore_delete_kek;
 using mozilla::security::lockstore::keystore_get_dek;
 using mozilla::security::lockstore::keystore_import_dek;
@@ -441,7 +444,12 @@ nsresult EnsureKeystoreAndKekLocked(const nsACString& aProfilePathUtf8) {
 
     if (isFeltSpawnedBrowser) {
       // Spawned browsing Firefox -- Password KEK keyed by primarySecret.
-      // Unlock-or-create.
+      // Unlock-or-create. There is deliberately NO LocalKey fallback: the
+      // browsing profile is only ever protected by the Password KEK, so if the
+      // primarySecret has not been delivered by Felt we fail closed (the
+      // browser stops) rather than fall back to the weaker plaintext-stored
+      // LocalKey. The startup migration therefore only runs for this profile
+      // once the secret is available (see ProfileObserver::Observe).
       if (sPrimarySecret.IsEmpty()) {
         MOZ_LOG(GetSQLiteEncryptionLog(), LogLevel::Error,
                 ("primarySecret not cached; cannot bootstrap Password KEK"));
@@ -487,7 +495,9 @@ nsresult EnsureKeystoreAndKekLocked(const nsACString& aProfilePathUtf8) {
       }
     } else {
       // Felt UI process / non-Felt build / CI (MOZ_BYPASS_FELT): LocalKey.
-      // create_kek with a fixed identifier is get-or-create.
+      // The Felt UI never receives a primarySecret (it is the entity that
+      // fetches it), so the LocalKey is its permanent KEK -- this is not a
+      // fallback. create_kek with a fixed identifier is get-or-create.
       const nsCString kekType("local"_ns);
       const nsCString kekId("sqlite"_ns);
       const nsCString empty;
@@ -621,18 +631,39 @@ NS_IMETHODIMP ProfileObserver::Observe(nsISupports*, const char* aTopic,
     // blocked main thread.
     EnsureProfilePathCached();
     EnsureNSSInitializedForEncryptionIfReady();
-    // Also pull the Felt-supplied primarySecret into our cache here,
-    // but only in the spawned-Browser-Firefox case. The Felt UI
-    // process itself never receives primarySecret over IPC (it's the
-    // entity that fetches it), so polling there would burn the full
-    // 5s timeout for nothing -- and GetEncryptionKey routes the UI
-    // process to the LocalKey path regardless.
+    // Pull the Felt-supplied primarySecret into our cache, but only for the
+    // spawned browsing Firefox: the Felt UI process never receives it over IPC
+    // (it is the entity that fetches it) and uses the LocalKey, so polling
+    // there would just burn the timeout. The browsing profile has NO LocalKey
+    // fallback, so a missing secret means we must NOT migrate it here -- the
+    // browser will fail closed when it opens its encrypted databases.
+    bool mayMigrate = true;
 #if defined(MOZ_ENTERPRISE)
     if (StaticPrefs::security_storage_encryption_sqlite_enabled() &&
         is_felt_browser()) {
-      (void)EnsurePrimarySecretCached();
+      // Only migrate the browsing profile once its Password KEK is available.
+      mayMigrate = NS_SUCCEEDED(EnsurePrimarySecretCached());
     }
 #endif
+
+    // One-time plaintext->encrypted migration of any pre-existing in-profile
+    // databases, run before QuotaManager/Places/cookies open them (all of which
+    // open after profile-do-change). Idempotent + resumable: already-encrypted
+    // databases are skipped, so this is just a header scan on a converted
+    // profile. Each DEK is minted under the profile's own KEK -- the Password
+    // KEK for the spawned browser (its secret is now cached), the LocalKey for
+    // the Felt UI / non-Felt builds. Parent process only, gated on the master
+    // encryption pref, and -- for the browser -- on the secret being available.
+    if (mayMigrate && XRE_IsParentProcess() &&
+        StaticPrefs::security_storage_encryption_sqlite_enabled()) {
+      nsString migProfilePath;
+      if (NS_SUCCEEDED(GetCachedProfilePath(migProfilePath))) {
+        nsCOMPtr<nsIFile> migProfileDir = new nsLocalFile();
+        if (NS_SUCCEEDED(migProfileDir->InitWithPath(migProfilePath))) {
+          (void)MigrateProfileToEncrypted(migProfileDir);
+        }
+      }
+    }
   } else if (!strcmp(aTopic, "profile-after-change")) {
     EnsureProfilePathCached();
     MarkProfileEncryptedIfNeeded();
@@ -922,6 +953,92 @@ nsresult GetEncryptionKey(const nsACString& aDatabasePath, OpenIntent aIntent,
   }
   HexEncode(dek, aOutHexKey);
   return NS_OK;
+}
+
+nsresult GenerateEncryptionKeys(nsACString& aOutHex) {
+  // Mint the key material through lockstore (keystore_create_dek uses the
+  // keystore's vetted RNG) rather than a separate OS RNG, so all SQLite key
+  // generation goes through lockstore. The database's own collection DEK must
+  // stay untouched until the crash-safe repoint at the end of rotation
+  // (ReplaceDatabaseDek, guarded by the .rekey-pending journal), so mint into a
+  // throwaway scratch collection, read the bytes, then drop the scratch entry.
+  nsString profilePath;
+  nsresult rv = GetCachedProfilePath(profilePath);
+  NS_ENSURE_SUCCESS(rv, rv);
+  NS_ConvertUTF16toUTF8 profilePathUtf8(profilePath);
+
+  StaticMutexAutoLock lock(sStateMutex);
+  if (sShuttingDown) {
+    return NS_ERROR_FAILURE;
+  }
+  // Resolve sHandle + sKekRef the same way GetEncryptionKey does: the Password
+  // KEK for the spawned Felt browser, the LocalKey otherwise.
+  rv = EnsureKeystoreAndKekLocked(profilePathUtf8);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  // A collection name that can never collide with a real database: profile-
+  // relative database paths never begin with a control byte.
+  nsAutoCString scratch;
+  scratch.Assign('\x01');
+  scratch.AppendLiteral("sqlite-rekey-scratch");
+
+  (void)keystore_delete_dek(sHandle, &scratch);  // drop any stale scratch entry
+  rv = keystore_create_dek(sHandle, &scratch, &sKekRef, /* extractable */ true,
+                           /* key_size */ kDekBytes);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  nsTArray<uint8_t> dek;
+  rv = keystore_get_dek(sHandle, &scratch, &sKekRef, &dek);
+  (void)keystore_delete_dek(sHandle, &scratch);  // clean up regardless
+  NS_ENSURE_SUCCESS(rv, rv);
+  if (dek.Length() != kDekBytes) {
+    return NS_ERROR_UNEXPECTED;
+  }
+  HexEncode(dek, aOutHex);
+  return NS_OK;
+}
+
+nsresult ReplaceDatabaseDek(const nsACString& aDatabasePath,
+                            const nsACString& aNewDekHex) {
+  // Resolve the lockstore collection (profile-relative path), exactly as
+  // GetEncryptionKey does, so the rotated key lands under the same name.
+  nsString profilePath;
+  nsresult rv = GetCachedProfilePath(profilePath);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  nsCOMPtr<nsIFile> profileDir = new nsLocalFile();
+  rv = profileDir->InitWithPath(profilePath);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  nsCOMPtr<nsIFile> dbFile = new nsLocalFile();
+  rv = dbFile->InitWithPath(NS_ConvertUTF8toUTF16(aDatabasePath));
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  nsAutoCString collection;
+  rv = dbFile->GetRelativePath(profileDir, collection);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  nsTArray<uint8_t> dek;
+  rv = HexDecode(aNewDekHex, dek);
+  NS_ENSURE_SUCCESS(rv, rv);
+  if (dek.Length() != kDekBytes) {
+    return NS_ERROR_INVALID_ARG;
+  }
+
+  NS_ConvertUTF16toUTF8 profilePathUtf8(profilePath);
+  StaticMutexAutoLock lock(sStateMutex);
+  if (sShuttingDown) {
+    return NS_ERROR_FAILURE;
+  }
+  rv = EnsureKeystoreAndKekLocked(profilePathUtf8);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  // Drop the existing DEK row and import the new bytes under the same KEK. Not
+  // atomic across the two calls; the caller's .rekey-pending journal recovers
+  // an interrupted repoint.
+  (void)keystore_delete_dek(sHandle, &collection);
+  return keystore_import_dek(sHandle, &collection, &sKekRef, dek.Elements(),
+                             dek.Length(), /* extractable */ true);
 }
 
 // Delivery point for the console-supplied primarySecret, called from the Felt

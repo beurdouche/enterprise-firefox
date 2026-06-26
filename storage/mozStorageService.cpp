@@ -29,6 +29,9 @@
 #include "mozilla/intl/Collator.h"
 #include "mozilla/intl/LocaleService.h"
 #include "mozilla/storage/SQLiteEncryption.h"
+#include "mozilla/storage/SQLiteMigration.h"
+#include "mozilla/Preferences.h"
+#include "ScopedNSSTypes.h"
 
 #include "sqlite3.h"
 #include "mozilla/AutoSQLiteLifetime.h"
@@ -651,6 +654,36 @@ Service::OpenDatabaseWithFileURL(nsIFileURL* aFileURL,
 
   msc.forget(_connection);
   return NS_OK;
+}
+
+// Shared guard for the two synchronous, test-only entry points below: resolve
+// the profile directory once at-rest encryption testing is enabled and NSS is
+// up. Returns NS_ERROR_NOT_AVAILABLE when the testing pref is off.
+static nsresult PrepareForTestOnlyMigration(nsIFile** aProfileDir) {
+  if (!Preferences::GetBool("security.storage.encryption.sqlite.testing",
+                            false)) {
+    return NS_ERROR_NOT_AVAILABLE;
+  }
+  if (!EnsureNSSInitializedChromeOrContent()) {
+    return NS_ERROR_FAILURE;
+  }
+  return NS_GetSpecialDirectory(NS_APP_USER_PROFILE_50_DIR, aProfileDir);
+}
+
+NS_IMETHODIMP
+Service::MigrateProfileToEncryptedNow() {
+  nsCOMPtr<nsIFile> profileDir;
+  nsresult rv = PrepareForTestOnlyMigration(getter_AddRefs(profileDir));
+  NS_ENSURE_SUCCESS(rv, rv);
+  return MigrateProfileToEncrypted(profileDir);
+}
+
+NS_IMETHODIMP
+Service::RotateProfileDeksNow() {
+  nsCOMPtr<nsIFile> profileDir;
+  nsresult rv = PrepareForTestOnlyMigration(getter_AddRefs(profileDir));
+  NS_ENSURE_SUCCESS(rv, rv);
+  return RotateProfileDeks(profileDir);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

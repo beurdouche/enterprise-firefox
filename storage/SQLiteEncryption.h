@@ -96,6 +96,24 @@ bool IsBootstrapDatabasePath(const nsACString& aPath);
 nsresult GetEncryptionKey(const nsACString& aDatabasePath, OpenIntent aIntent,
                           nsACString& aOutHexKey);
 
+// Rotation support, used by storage/SQLiteMigration.cpp. Both require NSS and
+// resolve the profile path + KEK the same way GetEncryptionKey does (the
+// Password KEK for the Felt browser, the LocalKey otherwise).
+
+// Mint a fresh 32-byte DEK through lockstore (keystore_create_dek), hex-encoded
+// (64 chars). Used by DEK rotation to obtain a new key before re-encrypting a
+// database under it. The key material comes from lockstore's RNG, not a
+// separate OS RNG. Requires NSS.
+nsresult GenerateEncryptionKeys(nsACString& aOutHex);
+
+// Repoint the lockstore for the database at |aDatabasePath|: drop its existing
+// DEK and import |aNewDekHex| (32 bytes, hex) under this profile's SQLite KEK.
+// The on-disk database must already have been re-encrypted under |aNewDekHex|
+// before this is called. The delete+import is not atomic; the caller's
+// .rekey-pending journal makes an interrupted repoint recoverable.
+nsresult ReplaceDatabaseDek(const nsACString& aDatabasePath,
+                            const nsACString& aNewDekHex);
+
 // Release the process-wide lockstore handle held by this module. Called
 // from mozStorageService shutdown.
 void ShutdownEncryptionKeystore();

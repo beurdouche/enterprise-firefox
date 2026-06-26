@@ -14,6 +14,7 @@ UNIFIED_SOURCES += [
     "test_interruptSynchronousConnection.cpp",
     "test_mutex.cpp",
     "test_spinningSynchronousClose.cpp",
+    "test_SQLiteMigration.cpp",
     "test_statement_scoper.cpp",
     "test_StatementCache.cpp",
     "test_transaction_helper.cpp",

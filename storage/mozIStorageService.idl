@@ -288,6 +288,24 @@ interface mozIStorageService : nsISupports {
   mozIStorageConnection openDatabaseWithFileURL(
       in nsIFileURL aFileURL, [optional] in ACString aTelemetryFilename,
       [optional] in unsigned long aConnectionFlags);
+
+  /**
+   * Test-only: run the plaintext->encrypted profile migration synchronously on
+   * the current profile, the same work the startup barrier performs. The caller
+   * MUST ensure no profile database is open. Gated on the
+   * "security.storage.encryption.sqlite.testing" pref; throws
+   * NS_ERROR_NOT_AVAILABLE otherwise.
+   */
+  void migrateProfileToEncryptedNow();
+
+  /**
+   * Test-only: run a DEK rotation synchronously on the current profile -- mint
+   * a fresh key per encrypted in-profile database and re-encrypt under it. The
+   * caller MUST ensure no profile database is open. Gated on the
+   * "security.storage.encryption.sqlite.testing" pref; throws
+   * NS_ERROR_NOT_AVAILABLE otherwise.
+   */
+  void rotateProfileDeksNow();
 };
 
 %{C++
