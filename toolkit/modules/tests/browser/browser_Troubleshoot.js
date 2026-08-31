@@ -453,6 +453,20 @@ const SNAPSHOT_SCHEMA = {
           required: false,
           type: "array",
         },
+        diskEncryption: {
+          required: false,
+          type: "object",
+          properties: {
+            status: {
+              required: true,
+              type: "string",
+            },
+            method: {
+              required: true,
+              type: ["string", "null"],
+            },
+          },
+        },
       },
     },
     processes: {

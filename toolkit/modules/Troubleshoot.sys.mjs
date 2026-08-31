@@ -8,6 +8,7 @@ import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
+  DiskEncryption: "resource://gre/modules/enterprise/DiskEncryption.sys.mjs",
   EdrDetection: "resource://gre/modules/enterprise/EdrDetection.sys.mjs",
   MachineId: "resource://gre/modules/enterprise/MachineId.sys.mjs",
   PlacesDBUtils: "resource://gre/modules/PlacesDBUtils.sys.mjs",
@@ -406,7 +407,10 @@ var dataProviders = {
     }
 
     if (AppConstants.MOZ_ENTERPRISE) {
-      data.presentEdrs = await lazy.EdrDetection.getPresentEdrs();
+      [data.presentEdrs, data.diskEncryption] = await Promise.all([
+        lazy.EdrDetection.getPresentEdrs(),
+        lazy.DiskEncryption.getStatus(),
+      ]);
     }
 
     done(data);

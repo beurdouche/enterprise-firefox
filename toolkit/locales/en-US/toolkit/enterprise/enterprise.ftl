@@ -11,6 +11,39 @@ app-basics-machine-id = Machine ID
 # Shown in the about:support "Security Software" section on enterprise builds.
 security-software-edr = Endpoint Detection and Response
 
+# Shown in the about:support "Security Software" section on enterprise builds.
+security-software-disk-encryption = Disk Encryption
+
+# $method identifies the platform encryption mechanism. FileVault, BitLocker,
+# dm-crypt, and ZFS are product names and should not be translated.
+# Variables:
+#   $method (String): "filevault", "bitlocker", "dm-crypt" or "zfs".
+security-software-disk-encryption-enabled =
+    { $method ->
+        [bitlocker] Enabled (BitLocker)
+        [dm-crypt] Enabled (dm-crypt)
+        [zfs] Enabled (ZFS)
+       *[filevault] Enabled (FileVault)
+    }
+
+# The boot volume is encrypted, but another mounted fixed volume is not.
+# Variables:
+#   $method (String): "filevault", "bitlocker", "dm-crypt" or "zfs".
+security-software-disk-encryption-partial =
+    { $method ->
+        [bitlocker] Partial (BitLocker); some mounted fixed volumes are not encrypted
+        [dm-crypt] Partial (dm-crypt); some mounted fixed volumes are not encrypted
+        [zfs] Partial (ZFS); some mounted fixed volumes are not encrypted
+       *[filevault] Partial (FileVault); some mounted fixed volumes are not encrypted
+    }
+
+security-software-disk-encryption-disabled = Disabled
+
+# A volume is currently being encrypted or decrypted.
+security-software-disk-encryption-in-progress = Encryption or decryption in progress
+
+security-software-disk-encryption-unknown = Unknown
+
 enterprise-toolbar-button =
     .label = { -brand-short-name }
     .tooltiptext = { -brand-short-name }
