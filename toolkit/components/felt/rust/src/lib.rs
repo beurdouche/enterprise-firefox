@@ -26,6 +26,7 @@ mod edr_checker_linux;
 mod edr_checker_macos;
 #[cfg(target_os = "windows")]
 mod edr_checker_win;
+mod process;
 mod utils;
 
 pub use utils::{CONSOLE_URL, TOKENS};
