@@ -35,7 +35,7 @@ extern "C" bool felt_read_bitlocker_protection(const char16_t* aRoot,
     RefPtr<IPropertyStore> store;
     HRESULT hr = SHGetPropertyStoreFromParsingName(
         reinterpret_cast<const wchar_t*>(aRoot), nullptr, GPS_DEFAULT,
-        IID_PPV_ARGS(getter_AddRefs(store)));
+        IID_IPropertyStore, getter_AddRefs(store));
     if (FAILED(hr) || !store) {
       return;
     }
