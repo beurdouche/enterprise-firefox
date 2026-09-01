@@ -22,8 +22,9 @@ security-software-disk-encryption-enabled =
     { $method ->
         [bitlocker] Enabled (BitLocker)
         [dm-crypt] Enabled (dm-crypt)
+        [filevault] Enabled (FileVault)
         [zfs] Enabled (ZFS)
-       *[filevault] Enabled (FileVault)
+       *[other] Enabled
     }
 
 # The boot volume is encrypted, but another mounted fixed volume is not.
@@ -33,8 +34,9 @@ security-software-disk-encryption-partial =
     { $method ->
         [bitlocker] Partial (BitLocker); some mounted fixed volumes are not encrypted
         [dm-crypt] Partial (dm-crypt); some mounted fixed volumes are not encrypted
+        [filevault] Partial (FileVault); some mounted fixed volumes are not encrypted
         [zfs] Partial (ZFS); some mounted fixed volumes are not encrypted
-       *[filevault] Partial (FileVault); some mounted fixed volumes are not encrypted
+       *[other] Partial; some mounted fixed volumes are not encrypted
     }
 
 security-software-disk-encryption-disabled = Disabled

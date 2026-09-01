@@ -91,9 +91,19 @@ add_task(
         text: "Enabled (ZFS)",
       },
       {
+        status: "enabled",
+        method: "unexpected",
+        text: "Enabled",
+      },
+      {
         status: "partial",
         method: "bitlocker",
         text: "Partial (BitLocker); some mounted fixed volumes are not encrypted",
+      },
+      {
+        status: "partial",
+        method: "unexpected",
+        text: "Partial; some mounted fixed volumes are not encrypted",
       },
       {
         status: "disabled",
