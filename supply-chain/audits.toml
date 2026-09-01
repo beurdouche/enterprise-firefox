@@ -85,7 +85,7 @@ notes = "Maintained by the CryptoEng team at Mozilla."
 [[wildcard-audits.cocoa]]
 who = "Bobby Holley <bobbyholley@gmail.com>"
 criteria = "safe-to-deploy"
-user-id = 2396 # Josh Matthews (jdm)
+user-id = 2396 # Josh Bowman-Matthews (jdm)
 start = "2019-07-23"
 end = "2023-05-04"
 renew = false
@@ -103,7 +103,7 @@ notes = "I've reviewed every source contribution that was neither authored nor r
 [[wildcard-audits.cocoa-foundation]]
 who = "Bobby Holley <bobbyholley@gmail.com>"
 criteria = "safe-to-deploy"
-user-id = 2396 # Josh Matthews (jdm)
+user-id = 2396 # Josh Bowman-Matthews (jdm)
 start = "2020-07-20"
 end = "2023-05-04"
 renew = false
@@ -121,7 +121,7 @@ notes = "I've reviewed every source contribution that was neither authored nor r
 [[wildcard-audits.core-foundation]]
 who = "Bobby Holley <bobbyholley@gmail.com>"
 criteria = "safe-to-deploy"
-user-id = 2396 # Josh Matthews (jdm)
+user-id = 2396 # Josh Bowman-Matthews (jdm)
 start = "2019-11-12"
 end = "2023-05-04"
 renew = false
@@ -139,7 +139,7 @@ notes = "I've reviewed every source contribution that was neither authored nor r
 [[wildcard-audits.core-foundation-sys]]
 who = "Bobby Holley <bobbyholley@gmail.com>"
 criteria = "safe-to-deploy"
-user-id = 2396 # Josh Matthews (jdm)
+user-id = 2396 # Josh Bowman-Matthews (jdm)
 start = "2019-11-12"
 end = "2023-05-04"
 renew = false
@@ -157,7 +157,7 @@ notes = "I've reviewed every source contribution that was neither authored nor r
 [[wildcard-audits.core-graphics]]
 who = "Bobby Holley <bobbyholley@gmail.com>"
 criteria = "safe-to-deploy"
-user-id = 2396 # Josh Matthews (jdm)
+user-id = 2396 # Josh Bowman-Matthews (jdm)
 start = "2019-10-28"
 end = "2023-05-04"
 renew = false
@@ -175,7 +175,7 @@ notes = "I've reviewed every source contribution that was neither authored nor r
 [[wildcard-audits.core-graphics-types]]
 who = "Bobby Holley <bobbyholley@gmail.com>"
 criteria = "safe-to-deploy"
-user-id = 2396 # Josh Matthews (jdm)
+user-id = 2396 # Josh Bowman-Matthews (jdm)
 start = "2020-07-20"
 end = "2023-05-04"
 renew = false
@@ -184,7 +184,7 @@ notes = "I've reviewed every source contribution that was neither authored nor r
 [[wildcard-audits.core-text]]
 who = "Bobby Holley <bobbyholley@gmail.com>"
 criteria = "safe-to-deploy"
-user-id = 2396 # Josh Matthews (jdm)
+user-id = 2396 # Josh Bowman-Matthews (jdm)
 start = "2019-03-29"
 end = "2023-05-04"
 renew = false
@@ -250,7 +250,7 @@ notes = "This crate is written and solely maintained by a mozilla employee."
 [[wildcard-audits.freetype]]
 who = "Bobby Holley <bobbyholley@gmail.com>"
 criteria = "safe-to-deploy"
-user-id = 2396 # Josh Matthews (jdm)
+user-id = 2396 # Josh Bowman-Matthews (jdm)
 start = "2020-02-28"
 end = "2023-05-04"
 renew = false
@@ -268,7 +268,7 @@ notes = "All code written or reviewed by Mozilla."
 [[wildcard-audits.gleam]]
 who = "Bobby Holley <bobbyholley@gmail.com>"
 criteria = "safe-to-deploy"
-user-id = 2396 # Josh Matthews (jdm)
+user-id = 2396 # Josh Bowman-Matthews (jdm)
 start = "2019-03-18"
 end = "2023-05-04"
 renew = false
@@ -339,7 +339,7 @@ notes = "Hawk is written and maintained by mozilla employees."
 [[wildcard-audits.io-surface]]
 who = "Bobby Holley <bobbyholley@gmail.com>"
 criteria = "safe-to-deploy"
-user-id = 2396 # Josh Matthews (jdm)
+user-id = 2396 # Josh Bowman-Matthews (jdm)
 start = "2019-07-23"
 end = "2023-05-04"
 renew = false
@@ -5697,6 +5697,12 @@ version = "0.18.0"
 notes = "Mozilla-developed package, no unsafe code, no access to file system, network or other far reaching APIs."
 
 [[audits.plist]]
+who = "Gian-Carlo Pascutto <gcp@mozilla.com>"
+criteria = "safe-to-deploy"
+version = "1.10.0"
+notes = "Full-source audit (9081 lines). unsafe-free, iterative parsers with input-proportional memory, no untrusted-input panic or DoS paths. The quick-xml ^0.41.0 and time ^0.3.47 requirement bumps fix RUSTSEC-2026-0194 and RUSTSEC-2026-0009."
+
+[[audits.plist]]
 who = "Erich Gubler <erichdongubler@gmail.com>"
 criteria = "safe-to-deploy"
 delta = "1.3.1 -> 1.7.0"
@@ -5938,9 +5944,21 @@ criteria = "safe-to-deploy"
 delta = "0.15.2 -> 0.16.0"
 
 [[audits.quick-xml]]
+who = "Gian-Carlo Pascutto <gcp@mozilla.com>"
+criteria = "safe-to-deploy"
+version = "0.37.5"
+notes = "Full-source audit (29076 lines). forbid(unsafe_code), no capabilities, no DTD entity expansion. Three availability-class defects (serde DOCTYPE panic, RUSTSEC-2026-0194, RUSTSEC-2026-0195) are unreachable via plist's Reader usage and all fixed in 0.41.0."
+
+[[audits.quick-xml]]
 who = "Lars Eggert <lars@eggert.org>"
 criteria = "safe-to-run"
 delta = "0.30.0 -> 0.37.5"
+
+[[audits.quick-xml]]
+who = "Gian-Carlo Pascutto <gcp@mozilla.com>"
+criteria = "safe-to-deploy"
+delta = "0.37.5 -> 0.41.0"
+notes = "Full source diff audited. Patches RUSTSEC-2026-0194 and RUSTSEC-2026-0195 plus several panic-on-malformed-input bugs. unsafe-free; the NsReader u16 nesting counter overflow is unreachable via plist."
 
 [[audits.quick-xml]]
 who = "Henrik Skupin <mail@hskupin.info>"
