@@ -48,6 +48,9 @@ class FeltPostureRemediation(FeltTests):
         self.posture_required_tools.value = json.dumps(REQUIRED_TOOLS)
 
         super().run_felt_base()
+        # The shared teardown drives the managed browser, so it has to be
+        # connected even though every assertion here runs in the FELT context.
+        self.connect_child_browser()
 
         self.run_directive_reaches_felt()
         state = self.run_remediation_runs()
@@ -140,12 +143,17 @@ class FeltPostureRemediation(FeltTests):
             lambda r: r["state"] == "blocked",
             "the spent document to be refused on the next cycle",
         )
-        assert record["lastErrorCode"] == "replay-rejected", (
+        assert record["blockErrorCode"] == "replay-rejected", (
             f"a spent counter should be reported as a replay: {record}"
         )
         assert record["attempts"] == 1, (
             f"a refused document must not consume the attempt budget: {record}"
         )
+        # The refusal must not erase the attempt that did run.
+        assert record["lastOutcome"] == "succeeded", (
+            f"the earlier successful attempt should still be reported: {record}"
+        )
+        assert record["lastExitCode"] == 0, record
 
     def _device_posture(self):
         r = requests.get(f"http://localhost:{self.console_port}/sso/get_device_posture")

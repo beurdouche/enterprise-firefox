@@ -208,6 +208,7 @@ export const PostureRemediation = {
               lastErrorCode: null,
               lastExitCode: null,
               lastAttemptAt: null,
+              blockErrorCode: null,
               documentCounter: null,
               state: "idle",
               nextAttemptAt: 0,
@@ -320,6 +321,7 @@ export const PostureRemediation = {
             lastErrorCode: r.lastErrorCode,
             lastExitCode: r.lastExitCode,
             lastAttemptAt: r.lastAttemptAt,
+            blockErrorCode: r.blockErrorCode,
             documentCounter: r.documentCounter,
           }),
         })
@@ -474,17 +476,19 @@ export const PostureRemediation = {
       // broken machine. It must not eat the attempt budget -- a signing outage
       // would otherwise silently exhaust it -- but it must not be retried every
       // cycle either, and the console needs to see it.
+      // Deliberately leaves lastOutcome/lastErrorCode/lastExitCode alone:
+      // those describe the last attempt that actually ran, and the console
+      // still needs to see it. A refusal is a separate event.
       record.state = "blocked";
       record.status = "blocked";
-      record.lastOutcome = Outcome.FAILED;
-      record.lastErrorCode = e.code ?? "fetch-failed";
-      record.lastExitCode = null;
+      record.blockErrorCode = e.code ?? "fetch-failed";
       record.blockedUntil = now + nextAttemptDelay(1);
       lazy.log.error(`Refusing to remediate ${record.id}:`, e);
       return;
     }
 
     record.blockedUntil = 0;
+    record.blockErrorCode = null;
     record.attempts += 1;
     record.lastAttemptAt = now;
     this._publish();
