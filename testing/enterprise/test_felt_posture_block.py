@@ -52,9 +52,25 @@ class FeltPostureBlock(FeltTests):
         # login. That also means this exercises the real directive path.
         self.posture_enforcement.value = "block"
 
+        # Leave a spent counter behind, as a reused ./mach run profile would.
+        # Without the seeded path clearing it, this session's first attempt
+        # would be refused as a replay and the user would be met with
+        # "couldn't be verified" and nothing having been tried.
+        self._felt_script(
+            """
+            const [resolve] = arguments;
+            Services.prefs.setStringPref(
+              "enterprise.posture.remediation.counters",
+              JSON.stringify({ curl: 5 })
+            );
+            resolve(true);
+            """
+        )
+
         super().run_felt_base()
 
         self.run_browser_is_held_back()
+        self.run_warning_is_not_occluded()
         self.run_fix_now_is_offered()
         attempts = self.run_fix_now_retries()
         self.run_relaxing_the_directive_releases_the_gate(attempts)
@@ -102,7 +118,46 @@ class FeltPostureBlock(FeltTests):
         record = self._record()
         assert record, "curl should be configured"
         assert record["status"] != "compliant", record
+
+        # The stale counter planted above must have been cleared by the seeded
+        # path, or nothing would have been attempted at all.
+        assert record["attempts"] >= 1, (
+            "a spent counter from a previous session should not stop this one "
+            f"from attempting: {record}"
+        )
+        assert record["blockErrorCode"] != "replay-rejected", (
+            f"the stale counter should have been cleared: {record}"
+        )
         self._logger.info(f"held back with: {record}")
+
+    def run_warning_is_not_occluded(self):
+        """The warning has to be somewhere the user can actually see it.
+
+        Submitting the email hides every message bar and swaps the card to the
+        SSO browser. Felt normally goes to the background from there because
+        the browser starts, so nothing undid it; under "block" that left the
+        user staring at a finished SSO pane. Asserting the bar's is-hidden
+        class is not enough -- it was already absent when this was broken --
+        so this pins the pane being put away."""
+        state = json.loads(
+            self._felt_script(
+                """
+                const [resolve] = arguments;
+                const sso = document.querySelector(".felt-login__sso");
+                const bar = document.querySelector(".felt-posture-warning-messages");
+                resolve(JSON.stringify({
+                  ssoHidden: sso.classList.contains("is-hidden"),
+                  barHidden: bar.classList.contains("is-hidden"),
+                }));
+                """
+            )
+        )
+        assert state["ssoHidden"], (
+            "the spent SSO pane should be put away once the gate holds, or the "
+            f"warning is rendered behind it: {state}"
+        )
+        assert not state["barHidden"], state
+        self._logger.info(f"warning not occluded: {state}")
 
     def run_fix_now_is_offered(self):
         """A blocked user needs something to press."""

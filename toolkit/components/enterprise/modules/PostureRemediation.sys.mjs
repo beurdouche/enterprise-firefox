@@ -104,6 +104,17 @@ const GATE_POLL_PREF = "enterprise.posture.remediation.gate_poll_ms";
 const SEED_REQUIREMENTS_PREF =
   "enterprise.posture.remediation.seed_requirements";
 
+/**
+ * Enforcement mode to use when the console sent none. Same development-only
+ * gate as SEED_REQUIREMENTS_PREF: without it "block" is unreachable from
+ * ./mach run, because an omitted enforcement field deliberately resets to
+ * "warn" and would overwrite a hand-set pref at login.
+ */
+const SEED_ENFORCEMENT_PREF = "enterprise.posture.remediation.seed_enforcement";
+
+// Owned by RemediationVerifier; cleared here only on the seeded dev path.
+const COUNTERS_PREF_FOR_SEED = "enterprise.posture.remediation.counters";
+
 function seedingAllowed() {
   return AppConstants.MOZ_UPDATE_CHANNEL === "default" && lazy.isTesting();
 }
@@ -140,7 +151,19 @@ export const Enforcement = {
    * @returns {string} The value written.
    */
   write(mode) {
-    const value = ENFORCEMENT_MODES.includes(mode) ? mode : DEFAULT_ENFORCEMENT;
+    let value = ENFORCEMENT_MODES.includes(mode) ? mode : DEFAULT_ENFORCEMENT;
+    // Only when the console sent nothing usable, and only on a build that
+    // cannot ship. Production keeps the reset-on-omit behaviour exactly.
+    if (!ENFORCEMENT_MODES.includes(mode) && seedingAllowed()) {
+      const seeded = Services.prefs.getStringPref(SEED_ENFORCEMENT_PREF, "");
+      if (ENFORCEMENT_MODES.includes(seeded)) {
+        lazy.log.warn(
+          `Seeding enforcement '${seeded}' from ${SEED_ENFORCEMENT_PREF}. ` +
+            `Development-only path, unreachable in a shipping build.`
+        );
+        value = seeded;
+      }
+    }
     Services.prefs.setStringPref(ENFORCEMENT_PREF, value);
     return value;
   },
@@ -256,6 +279,7 @@ export const PostureRemediation = {
   _paused: false,
   _published: Object.freeze([]),
   _onWarning: null,
+  _onGateChanged: null,
   _userRequested: false,
   _lastWarningKey: "",
 
@@ -348,6 +372,10 @@ export const PostureRemediation = {
         .map(entry => lazy.PostureToolCatalog.validateRequirement(entry))
         .filter(Boolean);
       if (seeded.length) {
+        // ./mach run reuses its profile, so a counter spent by a previous
+        // session would refuse the first attempt of this one and the demo
+        // would open on a replay refusal. Development path only.
+        Services.prefs.clearUserPref(COUNTERS_PREF_FOR_SEED);
         lazy.log.warn(
           `Seeding ${seeded.length} requirement(s) from ` +
             `${SEED_REQUIREMENTS_PREF}. This is a development-only path and ` +
@@ -440,20 +468,26 @@ export const PostureRemediation = {
     }
 
     lazy.log.warn("Enforcement is 'block': holding the browser back.");
+    try {
+      this._onGateChanged?.(true);
+    } catch (e) {
+      lazy.log.error("Gate listener failed:", e);
+    }
     for (;;) {
-      if (isCancelled()) {
-        return "cancelled";
-      }
-      if (this._allCompliant()) {
-        return "compliant";
-      }
-      // A directive that arrived on a token refresh can relax enforcement or
-      // drop the requirement; either must release the gate.
-      if (this.enforcement() !== "block") {
-        return "relaxed";
-      }
-      if (!this._records.size) {
-        return "no-requirements";
+      const done =
+        (isCancelled() && "cancelled") ||
+        (this._allCompliant() && "compliant") ||
+        // A directive that arrived on a token refresh can relax enforcement
+        // or drop the requirement; either must release the gate.
+        (this.enforcement() !== "block" && "relaxed") ||
+        (!this._records.size && "no-requirements");
+      if (done) {
+        try {
+          this._onGateChanged?.(false);
+        } catch (e) {
+          lazy.log.error("Gate listener failed:", e);
+        }
+        return done;
       }
       await this._sleep(testNumberPref(GATE_POLL_PREF, GATE_POLL_MS));
       await this._forceCycle();
@@ -620,6 +654,20 @@ export const PostureRemediation = {
    */
   setWarningListener(callback) {
     this._onWarning = callback;
+  },
+
+  /**
+   * Registers a callback told when the launch gate starts and stops holding.
+   *
+   * The warning listener is not enough on its own: it only fires on state
+   * transitions, and the login flow hides every message bar on its way into
+   * SSO. Something has to put the window back into a state where the warning
+   * is visible once we know the browser is not coming.
+   *
+   * @param {((held: boolean) => void)|null} callback
+   */
+  setGateListener(callback) {
+    this._onGateChanged = callback;
   },
 
   _notifyWarning() {

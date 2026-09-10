@@ -31,6 +31,7 @@ ChromeUtils.defineLazyGetter(lazy, "log", () => {
 const BAR_SELECTOR = ".felt-posture-warning-messages";
 const DETAILS_SELECTOR = ".felt-browser-error-details";
 const BUTTON_ID = "felt-posture-remediate";
+const SSO_PANE_SELECTOR = ".felt-login__sso";
 
 /**
  * Picks the strings for a warning. Kept here rather than in
@@ -91,6 +92,7 @@ export const PostureWarning = {
       button.addEventListener("click", () => this._onRemediateClicked(button));
     }
     lazy.PostureRemediation.setWarningListener(warning => this.set(warning));
+    lazy.PostureRemediation.setGateListener(held => this._onGateChanged(held));
     // Pull the current state rather than waiting for the next transition: the
     // window may well have opened after the warning was raised.
     this._pending = lazy.PostureRemediation.currentWarning();
@@ -102,6 +104,7 @@ export const PostureWarning = {
 
   uninit() {
     lazy.PostureRemediation.setWarningListener(null);
+    lazy.PostureRemediation.setGateListener(null);
     this._doc = null;
   },
 
@@ -144,6 +147,26 @@ export const PostureWarning = {
       button.disabled = false;
       this._render();
     }
+  },
+
+  /**
+   * Puts the window into a state where the warning can be seen, once we know
+   * the browser is being held back.
+   *
+   * Submitting the email hides every message bar (FeltErrorReport.reset) and
+   * swaps the card to the SSO browser. Normally Felt goes to the background
+   * from there because the browser starts, so nothing ever needed to undo it.
+   * Under "block" the browser is not coming, and the user would otherwise be
+   * left looking at a finished SSO pane with no explanation.
+   *
+   * @param {boolean} held
+   */
+  _onGateChanged(held) {
+    if (!this._doc || !held) {
+      return;
+    }
+    this._doc.querySelector(SSO_PANE_SELECTOR)?.classList.add("is-hidden");
+    this._render();
   },
 
   _render() {

@@ -17,6 +17,7 @@ const { Enforcement } = ChromeUtils.importESModule(
 
 const SEED_PREF = "enterprise.posture.remediation.seed_requirements";
 const ENFORCEMENT_PREF = "enterprise.posture.remediation.enforcement";
+const SEED_ENFORCEMENT_PREF = "enterprise.posture.remediation.seed_enforcement";
 const TESTING_PREF = "enterprise.is_testing";
 
 const norm = v => PostureToolCatalog.normalizeVersion(v);
@@ -361,5 +362,44 @@ add_task(async function test_gate_releases_without_requirements() {
     await PostureRemediation.awaitCompliance({ isCancelled: () => false }),
     "no-requirements",
     "nothing required means nothing to wait for"
+  );
+});
+
+add_task(function test_seed_enforcement_requires_the_testing_gate() {
+  // "block" is what leaves a person without a browser, so the development
+  // seed for it must be as unreachable as the requirements seed.
+  registerCleanupFunction(() => {
+    Services.prefs.clearUserPref(SEED_ENFORCEMENT_PREF);
+    Services.prefs.clearUserPref(ENFORCEMENT_PREF);
+    Services.prefs.clearUserPref(TESTING_PREF);
+  });
+  Services.prefs.setStringPref(SEED_ENFORCEMENT_PREF, "block");
+
+  Services.prefs.setBoolPref(TESTING_PREF, false);
+  Assert.equal(
+    Enforcement.write(undefined),
+    "warn",
+    "the seed must not apply without the testing gate"
+  );
+
+  Services.prefs.setBoolPref(TESTING_PREF, true);
+  Assert.equal(
+    Enforcement.write(undefined),
+    "block",
+    "with the gate open, an omitted directive falls back to the seed"
+  );
+
+  // A console that does send a mode still wins: the seed only fills a gap.
+  Assert.equal(
+    Enforcement.write("warn"),
+    "warn",
+    "an explicit directive is not overridden by the seed"
+  );
+
+  Services.prefs.setStringPref(SEED_ENFORCEMENT_PREF, "nonsense");
+  Assert.equal(
+    Enforcement.write(undefined),
+    "warn",
+    "an unusable seed falls back to the safe default"
   );
 });
