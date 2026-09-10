@@ -11,6 +11,8 @@ ChromeUtils.defineESModuleGetters(lazy, {
     "resource://gre/modules/enterprise/EnterpriseCommon.sys.mjs",
   EdrDetection: "resource://gre/modules/enterprise/EdrDetection.sys.mjs",
   MachineId: "resource://gre/modules/enterprise/MachineId.sys.mjs",
+  PostureRemediation:
+    "resource://gre/modules/enterprise/PostureRemediation.sys.mjs",
   setInterval: "resource://gre/modules/Timer.sys.mjs",
   clearInterval: "resource://gre/modules/Timer.sys.mjs",
   TelemetryEnvironment: "resource://gre/modules/TelemetryEnvironment.sys.mjs",
@@ -238,6 +240,7 @@ export const DevicePosture = {
    * @property {boolean} isDomainJoined Whether the machine is joined to a domain (Windows on-prem AD or Azure AD/Entra).
    * @property {DeviceEdr[]} presentEdrs Detected EDR agents (empty if none, or if the console asked us to probe none).
    * @property {string} clientSessionId Identifies the browser run reporting this posture; see ClientSession.
+   * @property {object[]} toolCompliance Per-tool compliance and remediation state, sorted by id; see PostureRemediation.
    */
 
   /**
@@ -343,6 +346,10 @@ export const DevicePosture = {
       isDomainJoined: Services.sysinfo.getPropertyAsBool("isDomainJoined"),
       presentEdrs,
       clientSessionId: ClientSession.id,
+      // A synchronous read of a pre-built snapshot. Deliberately not a probe:
+      // this runs on the login path and while the browser is blocked on a
+      // token refresh, so it must not spawn anything.
+      toolCompliance: lazy.PostureRemediation.posture(),
     };
     return devicePosturePayload;
   },
@@ -393,6 +400,9 @@ export const PostureMonitor = {
     onRefreshRejected,
   }) {
     this.stop();
+    // stop() pauses remediation, and start() goes through stop(), so this has
+    // to undo it or remediation would never run after the first restart.
+    lazy.PostureRemediation.resume();
     this._profileDir = profileDir;
     this._intervalMs = intervalMs ?? DEFAULT_POSTURE_POLL_MS;
     this._onRefreshed = onRefreshed;
@@ -406,6 +416,9 @@ export const PostureMonitor = {
       lazy.clearInterval(this._timer);
       this._timer = null;
     }
+    // Stop scheduling, but leave a running child alone: killing an install
+    // mid-write is worse than letting it finish.
+    lazy.PostureRemediation.pause();
   },
 
   /**
@@ -415,6 +428,9 @@ export const PostureMonitor = {
    * @returns {Promise<void>}
    */
   tick() {
+    // Outside _inFlight on purpose: logoutFirefox() and startFirefox() await
+    // idle() on the critical path, and a remediation run can take minutes.
+    lazy.PostureRemediation.onTick();
     if (!this._inFlight) {
       this._inFlight = this._submitIfChanged().finally(() => {
         this._inFlight = null;

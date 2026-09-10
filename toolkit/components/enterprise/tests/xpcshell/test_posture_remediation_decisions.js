@@ -1,0 +1,177 @@
+/* Any copyright is dedicated to the Public Domain.
+ * http://creativecommons.org/publicdomain/zero/1.0/ */
+
+"use strict";
+
+const { PostureToolCatalog } = ChromeUtils.importESModule(
+  "resource://gre/modules/enterprise/PostureToolCatalog.sys.mjs"
+);
+const { decideStatus, nextAttemptDelay } = ChromeUtils.importESModule(
+  "resource://gre/modules/enterprise/PostureRemediation.sys.mjs"
+);
+
+const norm = v => PostureToolCatalog.normalizeVersion(v);
+
+add_task(function test_homebrew_revision_suffix_orders_correctly() {
+  // The regression this normalization exists for. nsVersionComparator
+  // documents "any string is before no string", so untouched, 1.2.3_1 sorts
+  // *below* 1.2.3 -- a formula at revision 1 would read as older than the same
+  // formula at no revision and be remediated forever.
+  Assert.equal(
+    Services.vc.compare("1.2.3_1", "1.2.3"),
+    -1,
+    "raw comparison is backwards, which is why normalizeVersion exists"
+  );
+  Assert.greater(
+    Services.vc.compare(norm("1.2.3_1"), norm("1.2.3")),
+    0,
+    "normalized, a revision bump is newer"
+  );
+  Assert.equal(norm("1.2.3_1"), "1.2.3.1");
+});
+
+add_task(function test_normalize_version_shapes() {
+  Assert.equal(norm("8.7.1"), "8.7.1");
+  Assert.equal(norm("v1.2.3"), "1.2.3", "a leading v is stripped");
+  Assert.equal(norm(" 1.7 "), "1.7", "surrounding whitespace is ignored");
+  Assert.equal(norm("1.7.1 (x86_64)"), "1.7.1", "trailing junk is dropped");
+
+  // Unparseable must be null so the caller reports "unknown" rather than
+  // "outdated"; a HEAD build would otherwise loop the remediator.
+  Assert.equal(norm("HEAD-abc1234"), null);
+  Assert.equal(norm(""), null);
+  Assert.equal(norm("not-a-version"), null);
+  Assert.equal(norm("9".repeat(33)), null, "absurdly long is rejected");
+  Assert.equal(norm(null), null);
+  Assert.equal(norm(42), null);
+});
+
+add_task(function test_decide_status_truth_table() {
+  const base = {
+    installed: "1.0.0",
+    required: "1.0.0",
+    supported: true,
+    probeFailed: false,
+  };
+
+  Assert.equal(decideStatus(base), "compliant", "equal versions are compliant");
+  Assert.equal(
+    decideStatus({ ...base, installed: "2.0.0" }),
+    "compliant",
+    "newer than required is compliant: brew installs latest, so exact-match would never converge"
+  );
+  Assert.equal(decideStatus({ ...base, installed: "0.9.0" }), "outdated");
+  Assert.equal(decideStatus({ ...base, installed: null }), "missing");
+  Assert.equal(
+    decideStatus({ ...base, required: null }),
+    "unknown",
+    "an unparseable requirement is never 'outdated'"
+  );
+  Assert.equal(decideStatus({ ...base, supported: false }), "unsupported");
+  Assert.equal(decideStatus({ ...base, probeFailed: true }), "check-failed");
+  Assert.equal(
+    decideStatus({ ...base, supported: false, probeFailed: true }),
+    "unsupported",
+    "an unsupported platform outranks a failed probe"
+  );
+});
+
+add_task(function test_backoff_is_monotonic_and_capped() {
+  const noJitter = () => 0.5;
+  const delays = [1, 2, 3, 4, 5, 6, 7, 8].map(n =>
+    nextAttemptDelay(n, noJitter)
+  );
+
+  for (let i = 1; i < delays.length; i++) {
+    Assert.greaterOrEqual(
+      delays[i],
+      delays[i - 1],
+      `attempt ${i + 1} waits at least as long as attempt ${i}`
+    );
+  }
+  Assert.equal(delays[0], 5 * 60 * 1000, "first retry is five minutes");
+  Assert.lessOrEqual(
+    delays[delays.length - 1],
+    4 * 60 * 60 * 1000,
+    "delay is capped at four hours"
+  );
+});
+
+add_task(function test_backoff_jitter_stays_in_band() {
+  const low = nextAttemptDelay(1, () => 0);
+  const high = nextAttemptDelay(1, () => 1);
+  const base = 5 * 60 * 1000;
+
+  Assert.equal(low, Math.round(base * 0.8), "jitter floor is -20%");
+  Assert.equal(high, Math.round(base * 1.2), "jitter ceiling is +20%");
+});
+
+add_task(function test_catalog_lookup_rejects_prototype_keys() {
+  Assert.equal(PostureToolCatalog.lookup("constructor"), null);
+  Assert.equal(PostureToolCatalog.lookup("__proto__"), null);
+  Assert.equal(PostureToolCatalog.lookup("toString"), null);
+  Assert.ok(!PostureToolCatalog.isKnownId("constructor"));
+  Assert.ok(!PostureToolCatalog.isKnownId("hasOwnProperty"));
+});
+
+add_task(function test_catalog_known_entry() {
+  Assert.ok(PostureToolCatalog.isKnownId("curl"));
+  const entry = PostureToolCatalog.lookup("curl", "macosx");
+  Assert.ok(entry, "curl has a macOS arm");
+  Assert.equal(entry.detect.kind, "commandVersion");
+  Assert.ok(
+    entry.detect.parse.test("curl 8.7.1 (aarch64-apple-darwin)"),
+    "the parse regex matches real curl output"
+  );
+
+  Assert.equal(
+    PostureToolCatalog.lookup("curl", "win"),
+    null,
+    "an id with no arm for the platform resolves to null"
+  );
+  Assert.ok(
+    PostureToolCatalog.isKnownId("curl"),
+    "...but stays a known id, so posture can report it as unsupported"
+  );
+});
+
+add_task(function test_validate_requirement() {
+  Assert.deepEqual(
+    PostureToolCatalog.validateRequirement({
+      id: "curl",
+      min_version: "1.0.0",
+    }),
+    {
+      id: "curl",
+      minVersion: "1.0.0",
+    }
+  );
+
+  const rejected = [
+    null,
+    {},
+    { id: "curl" },
+    { id: "unknown-tool", min_version: "1.0.0" },
+    { id: "../../bin/sh", min_version: "1.0.0" },
+    { id: "curl", min_version: "; rm -rf /" },
+    { id: "curl", min_version: "9".repeat(33) },
+    { id: 42, min_version: "1.0.0" },
+    { id: "constructor", min_version: "1.0.0" },
+  ];
+  for (const entry of rejected) {
+    Assert.equal(
+      PostureToolCatalog.validateRequirement(entry),
+      null,
+      `rejected ${JSON.stringify(entry)}`
+    );
+  }
+});
+
+add_task(function test_bin_dirs_are_absolute() {
+  const { BIN_DIRS } = ChromeUtils.importESModule(
+    "resource://gre/modules/enterprise/PostureToolCatalog.sys.mjs"
+  );
+  for (const dir of BIN_DIRS) {
+    Assert.ok(dir.startsWith("/"), `${dir} is absolute`);
+  }
+});

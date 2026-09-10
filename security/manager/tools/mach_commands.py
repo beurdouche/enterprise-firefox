@@ -127,6 +127,7 @@ def find_all_specifications(command_context):
         "security/manager/ssl",
         "services/settings/test/unit/test_remote_settings_signatures",
         "testing/xpcshell/moz-http2",
+        "toolkit/components/enterprise/tests/xpcshell/remediation",
         "toolkit/mozapps/extensions/test/xpcshell/data/productaddons",
     ]
     finder = FileFinder(command_context.topsrcdir)

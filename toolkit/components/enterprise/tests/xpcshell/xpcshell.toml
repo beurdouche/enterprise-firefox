@@ -9,4 +9,13 @@ skip-if = [
 
 ["test_felt_storage_console_address.js"]
 
+["test_posture_remediation_decisions.js"]
+
 ["test_relaunch_enforcer.js"]
+
+# macOS-only: the fixtures declare platform "macosx" and carry a macOS
+# remediation script, and the verifier checks the manifest against
+# AppConstants.platform. Cross-platform fixtures land with the feature.
+["test_remediation_verifier.js"]
+run-if = ["os == 'mac'"]
+support-files = ["remediation/**"]

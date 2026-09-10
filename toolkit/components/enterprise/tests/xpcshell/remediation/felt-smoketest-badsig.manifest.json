@@ -1,0 +1,14 @@
+{
+  "counter": 1,
+  "notAfter": "2026-01-30T00:00:00Z",
+  "notBefore": "2026-01-01T00:00:00Z",
+  "platform": "macosx",
+  "remediate": {
+    "interpreter": "sh",
+    "script": "IyEvYmluL3NoCiMgTWlsZXN0b25lIDEgcmVtZWRpYXRpb24gcGF5bG9hZDogcHJvdmVzIGEgdmVyaWZpZWQgc2lnbmVkIHNjcmlwdCByYW4sIHdpdGggYQojIHZpc2libGUgZWZmZWN0LiBGRUxUX1JFTUVESUFUSU9OX0FSVElGQUNUX0RJUiBpcyBzZXQgYnkgdGhlIGV4ZWN1dG9yLgpzZXQgLWV1CmFydGlmYWN0PSIke0ZFTFRfUkVNRURJQVRJT05fQVJUSUZBQ1RfRElSfS9oZWxsby13b3JsZC50eHQiCnByaW50ZiAnSGVsbG8gV29ybGRcbicgPiAiJGFydGlmYWN0IgppZiBbIC1kIC9BcHBsaWNhdGlvbnMvWmVkLmFwcCBdOyB0aGVuCiAgL3Vzci9iaW4vb3BlbiAtYSAvQXBwbGljYXRpb25zL1plZC5hcHAgIiRhcnRpZmFjdCIKZWxzZQogIC91c3IvYmluL29wZW4gLXQgIiRhcnRpZmFjdCIKZmkK",
+    "timeoutMs": 30000
+  },
+  "schemaVersion": 1,
+  "targetVersion": "1.0.0",
+  "toolId": "felt-smoketest-badsig"
+}

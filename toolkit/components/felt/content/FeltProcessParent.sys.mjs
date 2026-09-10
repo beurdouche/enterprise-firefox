@@ -12,6 +12,11 @@ ChromeUtils.defineESModuleGetters(lazy, {
   EDR_AGENTS_PREF: "resource://gre/modules/enterprise/DevicePosture.sys.mjs",
   EdrAgents: "resource://gre/modules/enterprise/DevicePosture.sys.mjs",
   PostureMonitor: "resource://gre/modules/enterprise/DevicePosture.sys.mjs",
+  PostureRemediation:
+    "resource://gre/modules/enterprise/PostureRemediation.sys.mjs",
+  REQUIRED_TOOLS_PREF:
+    "resource://gre/modules/enterprise/PostureRemediation.sys.mjs",
+  RequiredTools: "resource://gre/modules/enterprise/PostureRemediation.sys.mjs",
   CONSOLE_ADDRESS_PREF:
     "resource://gre/modules/enterprise/ConsoleClient.sys.mjs",
   isBuildAppBrowser:
@@ -352,6 +357,9 @@ export class FeltProcessParent extends JSProcessActorParent {
                   gFeltProcessParentInstance._storeEdrAgents(
                     postureConfig?.edr_agents
                   );
+                  gFeltProcessParentInstance._storeRequiredTools(
+                    postureConfig?.required_tools
+                  );
                   // Only a posture measured here is news to the console; a
                   // replayed one is already recorded against the session.
                   if (postureSubmitted && measuredAt) {
@@ -508,6 +516,29 @@ export class FeltProcessParent extends JSProcessActorParent {
   }
 
   /**
+   * Stores a required-tool list received mid-session, in this process and in
+   * the browser. An absent list preserves the current value; only the SSO
+   * callback's clears it on omit, exactly as for the EDR probe list.
+   *
+   * @param {object[]} [requiredTools]
+   */
+  _storeRequiredTools(requiredTools) {
+    if (!requiredTools) {
+      return;
+    }
+    const serialized = lazy.RequiredTools.write(requiredTools);
+    lazy.PostureRemediation.configureFromPref();
+    try {
+      Services.felt.sendStringPreference(lazy.REQUIRED_TOOLS_PREF, serialized);
+    } catch (e) {
+      lazy.log.error(
+        "Could not send the required-tool list to the browser:",
+        e
+      );
+    }
+  }
+
+  /**
    * Sends preference to Firefox through felt
    *
    * @param {[key: string, value: boolean|string|number]} pref
@@ -640,6 +671,10 @@ export class FeltProcessParent extends JSProcessActorParent {
           lazy.EDR_AGENTS_PREF,
           Services.prefs.getStringPref(lazy.EDR_AGENTS_PREF, "[]")
         );
+        Services.felt.sendStringPreference(
+          lazy.REQUIRED_TOOLS_PREF,
+          Services.prefs.getStringPref(lazy.REQUIRED_TOOLS_PREF, "[]")
+        );
 
         Services.felt.sendAccessToken();
 
@@ -665,6 +700,7 @@ export class FeltProcessParent extends JSProcessActorParent {
             // posture-less refresh.
             Services.felt.sendAccessToken();
             this._storeEdrAgents(session.posture?.edr_agents);
+            this._storeRequiredTools(session.posture?.required_tools);
           },
           isSessionOver: () => this.logoutReported,
           onRefreshRejected: error => this.endSessionAfterRefreshFailure(error),
@@ -1108,6 +1144,8 @@ export class FeltProcessParent extends JSProcessActorParent {
           // Login starts a fresh session, so an absent list clears the probe
           // list of the previous one rather than preserving it.
           lazy.EdrAgents.write(postureConfig?.edr_agents);
+          lazy.RequiredTools.write(postureConfig?.required_tools);
+          lazy.PostureRemediation.configureFromPref();
 
           // Read the extension list from the profile on disk, before the browser
           // is spawned and its AddonManager rewrites extensions.json.

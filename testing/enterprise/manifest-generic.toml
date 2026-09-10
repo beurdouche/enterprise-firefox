@@ -26,6 +26,11 @@ subsuite = "enterprise"
 
 ["test_felt_init_failures.py"]
 
+# macOS-only: the signed fixture declares platform "macosx" and its script
+# uses /usr/bin/open.
+["test_felt_posture_remediation.py"]
+run-if = ["os == 'mac'"]
+
 ["test_felt_restart_is_quit.py"]
 
 ["test_felt_restart_works.py"]

@@ -17,7 +17,11 @@ EXTRA_JS_MODULES.enterprise += [
     "modules/EnterpriseEndpoints.sys.mjs",
     "modules/EnterpriseOSInfo.sys.mjs",
     "modules/EnterpriseStorageEncryption.sys.mjs",
+    "modules/PostureRemediation.sys.mjs",
+    "modules/PostureToolCatalog.sys.mjs",
     "modules/RelaunchEnforcer.sys.mjs",
+    "modules/RemediationSource.sys.mjs",
+    "modules/RemediationVerifier.sys.mjs",
     "modules/Updates.sys.mjs",
 ]
 

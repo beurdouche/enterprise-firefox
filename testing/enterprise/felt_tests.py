@@ -180,6 +180,10 @@ class ConsoleHttpHandler(LocalHttpRequestHandler):
         raw = edr_agents.value if edr_agents is not None else ""
         if raw:
             posture["edr_agents"] = json.loads(raw)
+        required_tools = getattr(self.server, "posture_required_tools", None)
+        raw_tools = required_tools.value if required_tools is not None else ""
+        if raw_tools:
+            posture["required_tools"] = json.loads(raw_tools)
         return posture
 
     def build_policies_response(self):
@@ -661,6 +665,7 @@ def serve(
     token_fail_request=None,
     signout_count=None,
     posture_edr_agents=None,
+    posture_required_tools=None,
     relaunch=None,
     # TODO: Behavior is not yet clearly defined
     # device_posture_reply_forbidden=None,
@@ -706,6 +711,8 @@ def serve(
     httpd.signout_count = signout_count if signout_count is not None else Value("i", 0)
     if posture_edr_agents is not None:
         httpd.posture_edr_agents = posture_edr_agents
+    if posture_required_tools is not None:
+        httpd.posture_required_tools = posture_required_tools
     if relaunch is not None:
         httpd.relaunch = relaunch
     httpd.serve_updates = False
@@ -832,6 +839,7 @@ class FeltTestsBase(ConsoleSSOPortMixin, EnterpriseTestsBase):
         # JSON string served as the posture configuration's "edr_agents". Empty
         # omits the field entirely.
         self.posture_edr_agents = SharedString("")
+        self.posture_required_tools = SharedString("")
         # JSON served as the policy response's "relaunch" key; empty omits it.
         self.relaunch = SharedString("")
 
@@ -855,6 +863,7 @@ class FeltTestsBase(ConsoleSSOPortMixin, EnterpriseTestsBase):
                 token_fail_request=self.token_fail_request,
                 signout_count=self.signout_count,
                 posture_edr_agents=self.posture_edr_agents,
+                posture_required_tools=self.posture_required_tools,
                 relaunch=self.relaunch,
                 # TODO: Behavior is not yet clearly defined
                 # device_posture_reply_forbidden=self.device_posture_reply_forbidden,
