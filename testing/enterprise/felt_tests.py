@@ -184,6 +184,10 @@ class ConsoleHttpHandler(LocalHttpRequestHandler):
         raw_tools = required_tools.value if required_tools is not None else ""
         if raw_tools:
             posture["required_tools"] = json.loads(raw_tools)
+        enforcement = getattr(self.server, "posture_enforcement", None)
+        raw_enforcement = enforcement.value if enforcement is not None else ""
+        if raw_enforcement:
+            posture["enforcement"] = raw_enforcement
         return posture
 
     def build_policies_response(self):
@@ -666,6 +670,7 @@ def serve(
     signout_count=None,
     posture_edr_agents=None,
     posture_required_tools=None,
+    posture_enforcement=None,
     relaunch=None,
     # TODO: Behavior is not yet clearly defined
     # device_posture_reply_forbidden=None,
@@ -713,6 +718,8 @@ def serve(
         httpd.posture_edr_agents = posture_edr_agents
     if posture_required_tools is not None:
         httpd.posture_required_tools = posture_required_tools
+    if posture_enforcement is not None:
+        httpd.posture_enforcement = posture_enforcement
     if relaunch is not None:
         httpd.relaunch = relaunch
     httpd.serve_updates = False
@@ -840,6 +847,7 @@ class FeltTestsBase(ConsoleSSOPortMixin, EnterpriseTestsBase):
         # omits the field entirely.
         self.posture_edr_agents = SharedString("")
         self.posture_required_tools = SharedString("")
+        self.posture_enforcement = SharedString("")
         # JSON served as the policy response's "relaunch" key; empty omits it.
         self.relaunch = SharedString("")
 
@@ -864,6 +872,7 @@ class FeltTestsBase(ConsoleSSOPortMixin, EnterpriseTestsBase):
                 signout_count=self.signout_count,
                 posture_edr_agents=self.posture_edr_agents,
                 posture_required_tools=self.posture_required_tools,
+                posture_enforcement=self.posture_enforcement,
                 relaunch=self.relaunch,
                 # TODO: Behavior is not yet clearly defined
                 # device_posture_reply_forbidden=self.device_posture_reply_forbidden,

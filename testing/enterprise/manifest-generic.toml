@@ -26,6 +26,10 @@ subsuite = "enterprise"
 
 ["test_felt_init_failures.py"]
 
+# macOS-only: "block" enforcement and the Fix now action.
+["test_felt_posture_block.py"]
+run-if = ["os == 'mac'"]
+
 # macOS-only: Homebrew-backed detection.
 ["test_felt_posture_brew.py"]
 run-if = ["os == 'mac'"]

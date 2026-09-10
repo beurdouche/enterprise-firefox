@@ -68,6 +68,29 @@ const LOCAL_SOURCE_DIR_PREF = "enterprise.posture.remediation.local_dir";
 const ARTIFACT_DIR_NAME = "posture-remediation";
 
 /**
+ * How the console wants non-compliance handled.
+ *
+ * "warn" shows the warning, pauses long enough to read it, then launches;
+ * "block" refuses to launch until every requirement is compliant. Defaults to
+ * "warn", so a console that says nothing cannot lock anyone out and an admin
+ * opts into the strict behaviour per fleet.
+ */
+export const ENFORCEMENT_PREF = "enterprise.posture.remediation.enforcement";
+const ENFORCEMENT_MODES = Object.freeze(["warn", "block"]);
+const DEFAULT_ENFORCEMENT = "warn";
+
+// How long "warn" holds the browser back so the warning can actually be read.
+// Long enough for one sentence; the browser is otherwise ready to go.
+const WARN_DWELL_MS = 6000;
+const WARN_DWELL_PREF = "enterprise.posture.remediation.warn_dwell_ms";
+
+// How often "block" re-evaluates while holding the browser back. Short,
+// because a person is watching. Attempts stay backoff-limited underneath, so
+// this re-probes rather than re-installing.
+const GATE_POLL_MS = 3000;
+const GATE_POLL_PREF = "enterprise.posture.remediation.gate_poll_ms";
+
+/**
  * Requirements to use when the console sends none, in the console's own wire
  * format. A development affordance: the console cannot serve required_tools
  * yet, and the login path clears an absent list, so without this there is no
@@ -105,6 +128,23 @@ function compareById(a, b) {
   }
   return a.id > b.id ? 1 : 0;
 }
+
+/** The write side of ENFORCEMENT_PREF. */
+export const Enforcement = {
+  /**
+   * Records the console's enforcement mode. An absent or unrecognized value
+   * writes the safe default rather than preserving what was there, so a
+   * console that stops sending it cannot leave a fleet blocked.
+   *
+   * @param {string} [mode]
+   * @returns {string} The value written.
+   */
+  write(mode) {
+    const value = ENFORCEMENT_MODES.includes(mode) ? mode : DEFAULT_ENFORCEMENT;
+    Services.prefs.setStringPref(ENFORCEMENT_PREF, value);
+    return value;
+  },
+};
 
 /** The write side of REQUIRED_TOOLS_PREF, mirroring EdrAgents. */
 export const RequiredTools = {
@@ -216,6 +256,7 @@ export const PostureRemediation = {
   _paused: false,
   _published: Object.freeze([]),
   _onWarning: null,
+  _userRequested: false,
   _lastWarningKey: "",
 
   /**
@@ -321,6 +362,139 @@ export const PostureRemediation = {
       );
       return [];
     }
+  },
+
+  /**
+   * The console's enforcement mode, defaulting to "warn".
+   *
+   * @returns {string} "warn" or "block"
+   */
+  enforcement() {
+    const value = Services.prefs.getStringPref(
+      ENFORCEMENT_PREF,
+      DEFAULT_ENFORCEMENT
+    );
+    return ENFORCEMENT_MODES.includes(value) ? value : DEFAULT_ENFORCEMENT;
+  },
+
+  /** Whether every configured requirement is currently compliant. */
+  _allCompliant() {
+    return [...this._records.values()].every(r => r.status === "compliant");
+  },
+
+  /**
+   * Runs a cycle now, ignoring the normal schedule.
+   *
+   * The gate cannot wait for the monitor's interval: that is the console's
+   * policy-poll cadence and may be a minute, which is far too long to hold a
+   * sign-in. Remediation attempts stay backoff-limited inside _checkOne, so
+   * forcing cycles re-probes without re-installing.
+   */
+  async _forceCycle() {
+    this._nextCycleAt = 0;
+    this.onTick();
+    await this.idle();
+  },
+
+  _sleep(ms) {
+    return new Promise(resolve => lazy.setTimeout(resolve, ms));
+  },
+
+  /**
+   * Holds the browser launch until posture has been dealt with.
+   *
+   * In "warn" this evaluates once, and if the device is not compliant it
+   * pauses for WARN_DWELL_MS so the person can read the message before their
+   * browser appears. In "block" it holds indefinitely until compliant.
+   *
+   * The caller must have started PostureMonitor first, so token refreshes keep
+   * running while the browser is held back. That is what makes "block"
+   * recoverable: a changed directive arrives on a refresh and can relax
+   * enforcement or drop the requirement. Without it a device blocked on an
+   * unsatisfiable requirement could never be rescued, because the only channel
+   * that delivers a new directive would be stopped.
+   *
+   * @param {object} options
+   * @param {() => boolean} options.isCancelled Abort (sign-out, shutdown).
+   * @returns {Promise<string>} Why it stopped waiting.
+   */
+  async awaitCompliance({ isCancelled }) {
+    if (!this._records.size) {
+      return "no-requirements";
+    }
+    if (!Services.felt.isFeltUI()) {
+      return "not-felt";
+    }
+
+    await this._forceCycle();
+
+    if (this.enforcement() !== "block") {
+      if (this._allCompliant()) {
+        return "compliant";
+      }
+      lazy.log.warn(
+        "Device is not compliant; pausing so the warning can be read."
+      );
+      await this._sleep(testNumberPref(WARN_DWELL_PREF, WARN_DWELL_MS));
+      return "warned";
+    }
+
+    lazy.log.warn("Enforcement is 'block': holding the browser back.");
+    for (;;) {
+      if (isCancelled()) {
+        return "cancelled";
+      }
+      if (this._allCompliant()) {
+        return "compliant";
+      }
+      // A directive that arrived on a token refresh can relax enforcement or
+      // drop the requirement; either must release the gate.
+      if (this.enforcement() !== "block") {
+        return "relaxed";
+      }
+      if (!this._records.size) {
+        return "no-requirements";
+      }
+      await this._sleep(testNumberPref(GATE_POLL_PREF, GATE_POLL_MS));
+      await this._forceCycle();
+    }
+  },
+
+  /**
+   * Runs remediation now because a person asked, ignoring the backoff and any
+   * refusal that is holding the tool back.
+   *
+   * This is the escape hatch for "block" enforcement: without it a device
+   * whose document has already been spent has nothing to do but wait. It does
+   * not reset the attempt cap, so it cannot be used to loop forever, and the
+   * document still has to verify.
+   *
+   * @returns {Promise<void>}
+   */
+  async remediateNow() {
+    if (!Services.felt.isFeltUI()) {
+      return;
+    }
+    lazy.log.warn("Remediation requested by the user.");
+    this._userRequested = true;
+    for (const record of this._records.values()) {
+      if (record.status !== "compliant") {
+        record.nextAttemptAt = 0;
+        record.blockedUntil = 0;
+      }
+    }
+    this._paused = false;
+    await this._forceCycle();
+  },
+
+  /** Whether the UI should offer a Remediate action. */
+  canRemediateNow() {
+    return [...this._records.values()].some(
+      r =>
+        r.status === "missing" ||
+        r.status === "outdated" ||
+        r.status === "blocked"
+    );
   },
 
   /** Stops scheduling. Does not kill a running child; see _run(). */
@@ -461,6 +635,7 @@ export const PostureRemediation = {
   },
 
   async _cycle() {
+    const userRequested = this._userRequested;
     const now = Date.now();
     this._nextCycleAt = now + testNumberPref(CYCLE_MS_PREF, CYCLE_INTERVAL_MS);
 
@@ -469,6 +644,11 @@ export const PostureRemediation = {
     }
     this._publish();
     this._notifyWarning();
+    // One-shot: a later unattended attempt must go back to demanding a
+    // strictly newer counter.
+    if (userRequested) {
+      this._userRequested = false;
+    }
   },
 
   async _checkOne(record, now) {
@@ -627,6 +807,7 @@ export const PostureRemediation = {
       verified = await lazy.RemediationVerifier.verify(signed, {
         toolId: record.id,
         minVersion: record.required,
+        allowSameCounter: this._userRequested,
       });
     } catch (e) {
       // A document we will not run means a broken or hostile *source*, not a

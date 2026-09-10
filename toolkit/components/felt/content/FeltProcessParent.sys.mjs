@@ -12,6 +12,9 @@ ChromeUtils.defineESModuleGetters(lazy, {
   EDR_AGENTS_PREF: "resource://gre/modules/enterprise/DevicePosture.sys.mjs",
   EdrAgents: "resource://gre/modules/enterprise/DevicePosture.sys.mjs",
   PostureMonitor: "resource://gre/modules/enterprise/DevicePosture.sys.mjs",
+  Enforcement: "resource://gre/modules/enterprise/PostureRemediation.sys.mjs",
+  ENFORCEMENT_PREF:
+    "resource://gre/modules/enterprise/PostureRemediation.sys.mjs",
   PostureRemediation:
     "resource://gre/modules/enterprise/PostureRemediation.sys.mjs",
   REQUIRED_TOOLS_PREF:
@@ -73,6 +76,11 @@ export function queueURL(payload) {
     Services.cpmm.sendAsyncMessage("FeltParent:ForceFeltFocus", {});
   }
 }
+
+// Posture-monitor interval while the pre-launch gate holds the browser back.
+// Fixed rather than console-driven because polling_frequency has not arrived
+// yet, and short enough that a directive relaxing enforcement lands promptly.
+const GATE_MONITOR_INTERVAL_MS = 5000;
 
 let gFeltProcessParentInstance = null;
 
@@ -360,6 +368,9 @@ export class FeltProcessParent extends JSProcessActorParent {
                   gFeltProcessParentInstance._storeRequiredTools(
                     postureConfig?.required_tools
                   );
+                  gFeltProcessParentInstance._storeEnforcement(
+                    postureConfig?.enforcement
+                  );
                   // Only a posture measured here is news to the console; a
                   // replayed one is already recorded against the session.
                   if (postureSubmitted && measuredAt) {
@@ -516,6 +527,60 @@ export class FeltProcessParent extends JSProcessActorParent {
   }
 
   /**
+   * Starts posture monitoring.
+   *
+   * Called before the browser is spawned rather than after, because the
+   * pre-launch gate needs cycles running, and "block" enforcement needs token
+   * refreshes to continue while the browser is held back so a changed
+   * directive can arrive and release it.
+   *
+   * Called twice by design. The console's polling_frequency only arrives with
+   * the Firefox config, which cannot be applied before the browser exists, so
+   * the pre-launch call passes a short fixed interval and this is called again
+   * with the real cadence once the config has landed. start() is idempotent.
+   *
+   * @param {number} [intervalMs]
+   */
+  _startPostureMonitor(intervalMs = this._posturePollMs) {
+    lazy.PostureMonitor.start({
+      profileDir: this._profilePath,
+      intervalMs,
+      onRefreshed: session => {
+        // The browser must switch to the rotated access token immediately;
+        // otherwise its next authenticated call 401s and forces a second,
+        // posture-less refresh. There is no browser yet while the gate holds,
+        // so a not-connected failure here is expected rather than an error.
+        try {
+          Services.felt.sendAccessToken();
+        } catch (e) {
+          lazy.log.debug(`No browser to hand the rotated token to yet: ${e}`);
+        }
+        this._storeEdrAgents(session.posture?.edr_agents);
+        this._storeRequiredTools(session.posture?.required_tools);
+        this._storeEnforcement(session.posture?.enforcement);
+      },
+      isSessionOver: () => this.logoutReported,
+      onRefreshRejected: error => this.endSessionAfterRefreshFailure(error),
+    });
+  }
+
+  /**
+   * Records the console's enforcement mode. Written unconditionally, unlike
+   * the tool list: an absent value means the safe default, so a console that
+   * stops sending it releases a blocked fleet rather than stranding it.
+   *
+   * @param {string} [mode]
+   */
+  _storeEnforcement(mode) {
+    const value = lazy.Enforcement.write(mode);
+    try {
+      Services.felt.sendStringPreference(lazy.ENFORCEMENT_PREF, value);
+    } catch (e) {
+      lazy.log.debug(`Could not relay the enforcement mode: ${e}`);
+    }
+  }
+
+  /**
    * Stores a required-tool list received mid-session, in this process and in
    * the browser. An absent list preserves the current value; only the SSO
    * callback's clears it on omit, exactly as for the EDR probe list.
@@ -609,6 +674,22 @@ export class FeltProcessParent extends JSProcessActorParent {
       gObserversRegistered = true;
     }
 
+    // Posture is evaluated before the browser exists, and deliberately
+    // before the primarySecret is fetched: "block" enforcement can hold here
+    // indefinitely, and Felt must not sit on the storage-encryption secret
+    // while it waits.
+    // A fixed short interval: the console's polling_frequency is not known
+    // until the Firefox config is applied, which needs the browser.
+    this._startPostureMonitor(GATE_MONITOR_INTERVAL_MS);
+    const gate = await lazy.PostureRemediation.awaitCompliance({
+      isCancelled: () => this.logoutReported,
+    });
+    lazy.log.debug(`Posture gate released: ${gate}`);
+    if (gate === "cancelled") {
+      lazy.log.warn("Session ended while posture was holding the launch.");
+      return;
+    }
+
     // Fetch primarySecret from the console BEFORE spawning Firefox. The child's
     // storage encryption layer (mozStorage / obfsvfs) blocks at
     // profile-do-change waiting for it to unlock the
@@ -690,21 +771,9 @@ export class FeltProcessParent extends JSProcessActorParent {
         }
         notifyFirefoxReady();
 
-        // Monitor device posture on the policy-poll cadence.
-        lazy.PostureMonitor.start({
-          profileDir: this._profilePath,
-          intervalMs: this._posturePollMs,
-          onRefreshed: session => {
-            // The browser must switch to the rotated access token immediately;
-            // otherwise its next authenticated call 401s and forces a second,
-            // posture-less refresh.
-            Services.felt.sendAccessToken();
-            this._storeEdrAgents(session.posture?.edr_agents);
-            this._storeRequiredTools(session.posture?.required_tools);
-          },
-          isSessionOver: () => this.logoutReported,
-          onRefreshRejected: error => this.endSessionAfterRefreshFailure(error),
-        });
+        // Re-arm on the console's policy-poll cadence now that the Firefox
+        // config has been applied; the gate ran on a fixed short interval.
+        this._startPostureMonitor();
       })
       .then(() => {
         lazy.log.debug(
@@ -1145,6 +1214,7 @@ export class FeltProcessParent extends JSProcessActorParent {
           // list of the previous one rather than preserving it.
           lazy.EdrAgents.write(postureConfig?.edr_agents);
           lazy.RequiredTools.write(postureConfig?.required_tools);
+          this._storeEnforcement(postureConfig?.enforcement);
           lazy.PostureRemediation.configureFromPref();
 
           // Read the extension list from the profile on disk, before the browser

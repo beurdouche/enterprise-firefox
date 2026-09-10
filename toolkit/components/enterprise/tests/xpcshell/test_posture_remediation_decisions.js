@@ -11,7 +11,12 @@ const { decideStatus, nextAttemptDelay, PostureRemediation } =
     "resource://gre/modules/enterprise/PostureRemediation.sys.mjs"
   );
 
+const { Enforcement } = ChromeUtils.importESModule(
+  "resource://gre/modules/enterprise/PostureRemediation.sys.mjs"
+);
+
 const SEED_PREF = "enterprise.posture.remediation.seed_requirements";
+const ENFORCEMENT_PREF = "enterprise.posture.remediation.enforcement";
 const TESTING_PREF = "enterprise.is_testing";
 
 const norm = v => PostureToolCatalog.normalizeVersion(v);
@@ -300,5 +305,61 @@ add_task(function test_seed_is_validated_like_a_console_directive() {
     PostureRemediation._seedRequirements(),
     [],
     "a malformed seed pref seeds nothing rather than throwing"
+  );
+});
+
+add_task(function test_enforcement_defaults_to_warn() {
+  registerCleanupFunction(() => Services.prefs.clearUserPref(ENFORCEMENT_PREF));
+
+  Services.prefs.clearUserPref(ENFORCEMENT_PREF);
+  Assert.equal(
+    PostureRemediation.enforcement(),
+    "warn",
+    "an unset pref must not block anyone"
+  );
+
+  // A console that sends nothing, or something we do not understand, must not
+  // be able to leave a fleet blocked.
+  for (const bogus of ["", "BLOCK", "enforce", "true", "1", "warnn"]) {
+    Services.prefs.setStringPref(ENFORCEMENT_PREF, bogus);
+    Assert.equal(
+      PostureRemediation.enforcement(),
+      "warn",
+      `${JSON.stringify(bogus)} falls back to warn`
+    );
+  }
+
+  Services.prefs.setStringPref(ENFORCEMENT_PREF, "block");
+  Assert.equal(PostureRemediation.enforcement(), "block");
+  Services.prefs.setStringPref(ENFORCEMENT_PREF, "warn");
+  Assert.equal(PostureRemediation.enforcement(), "warn");
+});
+
+add_task(function test_enforcement_write_normalizes() {
+  registerCleanupFunction(() => Services.prefs.clearUserPref(ENFORCEMENT_PREF));
+
+  Assert.equal(Enforcement.write("block"), "block");
+  Assert.equal(Services.prefs.getStringPref(ENFORCEMENT_PREF), "block");
+
+  // Absent overwrites rather than preserving: a console that stops sending
+  // the field releases a blocked fleet instead of stranding it.
+  Assert.equal(
+    Enforcement.write(undefined),
+    "warn",
+    "an omitted mode resets to the safe default"
+  );
+  Assert.equal(Services.prefs.getStringPref(ENFORCEMENT_PREF), "warn");
+
+  Enforcement.write("block");
+  Assert.equal(Enforcement.write("nonsense"), "warn");
+  Assert.equal(Services.prefs.getStringPref(ENFORCEMENT_PREF), "warn");
+});
+
+add_task(async function test_gate_releases_without_requirements() {
+  PostureRemediation.testingOnly_reset();
+  Assert.equal(
+    await PostureRemediation.awaitCompliance({ isCancelled: () => false }),
+    "no-requirements",
+    "nothing required means nothing to wait for"
   );
 });

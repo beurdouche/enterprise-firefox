@@ -30,6 +30,7 @@ ChromeUtils.defineLazyGetter(lazy, "log", () => {
 
 const BAR_SELECTOR = ".felt-posture-warning-messages";
 const DETAILS_SELECTOR = ".felt-browser-error-details";
+const BUTTON_ID = "felt-posture-remediate";
 
 /**
  * Picks the strings for a warning. Kept here rather than in
@@ -85,6 +86,10 @@ export const PostureWarning = {
    */
   init(doc) {
     this._doc = doc;
+    const button = doc.getElementById(BUTTON_ID);
+    if (button) {
+      button.addEventListener("click", () => this._onRemediateClicked(button));
+    }
     lazy.PostureRemediation.setWarningListener(warning => this.set(warning));
     // Pull the current state rather than waiting for the next transition: the
     // window may well have opened after the warning was raised.
@@ -121,6 +126,26 @@ export const PostureWarning = {
     this._render();
   },
 
+  /**
+   * Runs remediation because the user asked. Disables the button for the
+   * duration so a second click cannot start a concurrent run -- the state
+   * machine is single-flight anyway, but a button that looks live while
+   * nothing happens is worse than one that looks busy.
+   *
+   * @param {Element} button
+   */
+  async _onRemediateClicked(button) {
+    button.disabled = true;
+    try {
+      await lazy.PostureRemediation.remediateNow();
+    } catch (e) {
+      lazy.log.error("User-requested remediation failed:", e);
+    } finally {
+      button.disabled = false;
+      this._render();
+    }
+  },
+
   _render() {
     // No window: _pending keeps the warning until one opens.
     if (!this._doc) {
@@ -131,8 +156,10 @@ export const PostureWarning = {
       lazy.log.error(`No ${BAR_SELECTOR} in the FELT document`);
       return;
     }
+    const button = this._doc.getElementById(BUTTON_ID);
     if (!this._pending) {
       bar.classList.add("is-hidden");
+      button?.classList.add("is-hidden");
       return;
     }
 
@@ -142,8 +169,20 @@ export const PostureWarning = {
     if (details) {
       this._doc.l10n.setAttributes(details, messageId, args);
     }
+    // The action is offered when the launch is being held back, which is the
+    // case where the user has no other way forward. In warn mode the browser
+    // is about to appear anyway, so a button would be pointless and would
+    // likely be clicked after the bar had gone.
+    const offerAction =
+      lazy.PostureRemediation.enforcement() === "block" &&
+      lazy.PostureRemediation.canRemediateNow();
+    button?.classList.toggle("is-hidden", !offerAction);
+
     bar.classList.remove("is-hidden");
-    lazy.log.debug(`Showing posture warning ${titleId} for ${args.tool}`);
+    lazy.log.debug(
+      `Showing posture warning ${titleId} for ${args.tool}` +
+        `${offerAction ? " with a remediate action" : ""}`
+    );
   },
 
   /** Test-only view of what would be rendered. */

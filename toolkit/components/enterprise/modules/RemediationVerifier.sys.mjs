@@ -162,9 +162,15 @@ export const RemediationVerifier = {
    * @param {number} [expected.now] Reference time, injected so the checked-in
    *   test fixtures can carry a fixed validity window instead of a window that
    *   silently expires one day.
+   * @param {boolean} [expected.allowSameCounter] Accept the counter already
+   *   spent for this tool, for a retry a person explicitly asked for. Never
+   *   accepts an older one, so a stale document still cannot be replayed.
    * @returns {Promise<VerifiedRemediation>}
    */
-  async verify(signed, { toolId, minVersion, now = Date.now() }) {
+  async verify(
+    signed,
+    { toolId, minVersion, now = Date.now(), allowSameCounter = false }
+  ) {
     const { manifestText, signature, certChain, origin } = signed;
 
     if (
@@ -248,12 +254,23 @@ export const RemediationVerifier = {
         "counter is not a non-negative integer"
       );
     }
+    // Unattended attempts demand a strictly newer counter, which is what
+    // stops a captured document being replayed at a device. A retry a person
+    // asked for may re-run the current document -- they already hold the
+    // privileges the script would use -- but still never an older one, so the
+    // no-going-backwards property holds either way.
     const seen = readCounters()[toolId];
-    if (Number.isSafeInteger(seen) && manifest.counter <= seen) {
-      reject(
-        RemediationError.REPLAY_REJECTED,
-        `counter ${manifest.counter} is not newer than ${seen}`
-      );
+    if (Number.isSafeInteger(seen)) {
+      const stale = allowSameCounter
+        ? manifest.counter < seen
+        : manifest.counter <= seen;
+      if (stale) {
+        reject(
+          RemediationError.REPLAY_REJECTED,
+          `counter ${manifest.counter} is not acceptable against ${seen}` +
+            `${allowSameCounter ? " (retry)" : ""}`
+        );
+      }
     }
 
     const remediate = manifest.remediate;

@@ -46,12 +46,40 @@ class FeltPostureSeed(FeltTests):
         self.connect_child_browser()
 
         self.run_console_sent_nothing()
+        self.run_remediated_before_launch()
         self.run_seed_drove_remediation()
 
     def _felt_script(self, script):
         driver = self.get_driver(Environment.FELT)
         driver.set_context("chrome")
         return driver.execute_async_script(script)
+
+    def run_remediated_before_launch(self):
+        """Posture is dealt with before the browser starts, not after.
+
+        connect_child_browser() has already returned, so the browser is up. If
+        remediation had still been scheduled off the post-launch monitor tick
+        this would be 0 attempts at this point; the pre-launch gate is what
+        makes it non-zero."""
+        records = json.loads(
+            self._felt_script(
+                """
+                const [resolve] = arguments;
+                const { PostureRemediation } = ChromeUtils.importESModule(
+                  "resource://gre/modules/enterprise/PostureRemediation.sys.mjs"
+                );
+                resolve(JSON.stringify(PostureRemediation.testingOnly_getState()));
+                """
+            )
+            or "[]"
+        )
+        record = next((r for r in records if r["id"] == "curl"), None)
+        assert record, f"curl should be configured by now: {records}"
+        assert record["attempts"] >= 1, (
+            "remediation should have run before the browser launched, "
+            f"not after: {record}"
+        )
+        self._logger.info(f"pre-launch remediation: attempts={record['attempts']}")
 
     def run_console_sent_nothing(self):
         """The pref the console writes is empty, so anything that happens
