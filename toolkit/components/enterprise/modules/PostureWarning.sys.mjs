@@ -48,6 +48,13 @@ function describe(warning) {
     version: warning.required,
   };
 
+  if (warning.state === "awaiting-action") {
+    return {
+      titleId: "felt-warning-title-posture-tool-outdated",
+      messageId: "felt-error-warning-posture-awaiting-action",
+      args,
+    };
+  }
   if (warning.state === "running") {
     return {
       titleId: "felt-warning-title-posture-updating",

@@ -556,6 +556,16 @@ export const PostureRemediation = {
     await this._forceCycle();
   },
 
+  /**
+   * Whether anything is waiting on the user rather than on us. Distinct from
+   * canRemediateNow(), which is about whether an action exists at all.
+   *
+   * @returns {boolean}
+   */
+  isAwaitingUser() {
+    return [...this._records.values()].some(r => r.state === "awaiting-action");
+  },
+
   /** Whether the UI should offer a Remediate action. */
   canRemediateNow() {
     return [...this._records.values()].some(
@@ -803,6 +813,14 @@ export const PostureRemediation = {
     }
     if (now < record.nextAttemptAt) {
       record.state = "backoff";
+      return;
+    }
+    // Under "block" the user is already being held, so ask before changing
+    // their machine: an upgrade is not something to start unprompted seconds
+    // after a sign-in. Under "warn" the browser is coming regardless, so
+    // remediate quietly rather than demanding a decision nobody asked for.
+    if (this.enforcement() === "block" && !this._userRequested) {
+      record.state = "awaiting-action";
       return;
     }
     await this._attempt(record, now);
@@ -1174,11 +1192,19 @@ export const PostureRemediation = {
 
     const drain = async pipe => {
       let out = "";
-      let chunk;
-      while ((chunk = await pipe.readString())) {
-        if (out.length < MAX_CAPTURE_BYTES) {
-          out += chunk;
+      try {
+        let chunk;
+        while ((chunk = await pipe.readString())) {
+          if (out.length < MAX_CAPTURE_BYTES) {
+            out += chunk;
+          }
         }
+      } catch (e) {
+        // The pipe going away mid-read is the end of the stream, not a
+        // failure: killing the child on timeout closes it under us, and so
+        // does a child that exits while we are still reading. Keep whatever
+        // arrived and let the exit code and timedOut flag be the verdict.
+        lazy.log.debug(`Pipe closed while draining: ${e}`);
       }
       return out;
     };

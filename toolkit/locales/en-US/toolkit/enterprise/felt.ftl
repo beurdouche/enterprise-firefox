@@ -112,6 +112,7 @@ felt-warning-title-posture-tool-outdated =
     .heading = Required software is out of date
 felt-error-warning-posture-tool-outdated = Your organization requires { $tool } version { $version } or later on this device. { -brand-short-name } is updating it.
 felt-error-warning-posture-package-outdated = { $tool } is out of date on this device. { -brand-short-name } can update it for you.
+felt-error-warning-posture-awaiting-action = { $tool } is out of date, and { -brand-short-name } won’t start until it’s updated. Choose Fix now to update it.
 felt-warning-title-posture-updating =
     .heading = Updating required software…
 felt-error-warning-posture-updating = { -brand-short-name } is updating { $tool }. This can take a few minutes, and { -brand-short-name } will start once it finishes.

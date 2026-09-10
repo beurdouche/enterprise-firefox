@@ -124,14 +124,13 @@ class FeltPostureBlock(FeltTests):
         assert record, "curl should be configured"
         assert record["status"] != "compliant", record
 
-        # The stale counter planted above must have been cleared by the seeded
-        # path, or nothing would have been attempted at all.
-        assert record["attempts"] >= 1, (
-            "a spent counter from a previous session should not stop this one "
-            f"from attempting: {record}"
+        # Under "block" nothing is changed on the machine until the user
+        # asks, so the gate must be waiting rather than having acted.
+        assert record["state"] == "awaiting-action", (
+            f"block enforcement should wait for the user, not act: {record}"
         )
-        assert record["blockErrorCode"] != "replay-rejected", (
-            f"the stale counter should have been cleared: {record}"
+        assert record["attempts"] == 0, (
+            f"nothing should have been attempted unprompted: {record}"
         )
         self._logger.info(f"held back with: {record}")
 
@@ -202,10 +201,10 @@ class FeltPostureBlock(FeltTests):
     def run_fix_now_retries(self):
         """Clicking it re-runs the current document.
 
-        The counter is already spent by the gate's first attempt, so an
-        unattended retry would be refused as a replay. A user-requested one is
-        allowed to re-run the same document -- never an older one -- which is
-        what makes the button do something rather than report replay-rejected.
+        This is the only thing that changes the machine under "block", so it
+        is also where the counter handling is exercised: a stale counter was
+        planted before login, and a user-requested run may re-use the current
+        document -- never an older one.
         """
         before = self._record()["attempts"]
 
