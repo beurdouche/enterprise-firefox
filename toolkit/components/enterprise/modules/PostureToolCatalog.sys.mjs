@@ -26,6 +26,16 @@ export const BIN_DIRS = Object.freeze([
   "/bin",
 ]);
 
+/**
+ * Homebrew prefixes, in order. Compiled in: never $PATH, never brew --prefix
+ * (chicken and egg), and never $HOMEBREW_PREFIX, which is environment-supplied
+ * input naming a program path.
+ */
+export const BREW_CANDIDATES = Object.freeze([
+  "/opt/homebrew/bin/brew", // Apple silicon default prefix
+  "/usr/local/bin/brew", // Intel default prefix
+]);
+
 const CATALOG = Object.freeze(
   Object.assign(Object.create(null), {
     curl: Object.freeze({
@@ -38,6 +48,22 @@ const CATALOG = Object.freeze(
             args: Object.freeze(["--version"]),
             parse: /^curl (\S+)/m,
           }),
+        }),
+      }),
+    }),
+    jq: Object.freeze({
+      id: "jq",
+      platforms: Object.freeze({
+        macosx: Object.freeze({
+          detect: Object.freeze({ kind: "brewFormula", formula: "jq" }),
+        }),
+      }),
+    }),
+    bash: Object.freeze({
+      id: "bash",
+      platforms: Object.freeze({
+        macosx: Object.freeze({
+          detect: Object.freeze({ kind: "brewFormula", formula: "bash" }),
         }),
       }),
     }),
@@ -93,6 +119,38 @@ export const PostureToolCatalog = {
       return null;
     }
     return { id, minVersion };
+  },
+
+  /**
+   * The highest version `brew list --versions <formula>` reports, or null when
+   * the formula is not installed.
+   *
+   * Output is one line per formula, `<name> <version> [<version> ...]`; a
+   * multi-keg formula lists several, and the newest is the one that matters.
+   * An absent formula prints nothing and exits non-zero.
+   *
+   * @param {string} stdout
+   * @param {string} formula
+   * @returns {string|null} A normalized version, or null.
+   */
+  parseBrewVersions(stdout, formula) {
+    if (typeof stdout !== "string") {
+      return null;
+    }
+    let best = null;
+    for (const line of stdout.split("\n")) {
+      const fields = line.trim().split(/\s+/);
+      if (fields.shift() !== formula) {
+        continue;
+      }
+      for (const raw of fields) {
+        const version = this.normalizeVersion(raw);
+        if (version && (!best || Services.vc.compare(version, best) > 0)) {
+          best = version;
+        }
+      }
+    }
+    return best;
   },
 
   /**

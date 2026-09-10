@@ -55,6 +55,13 @@ function describe(warning) {
       args,
     };
   }
+  if (warning.status === "unavailable") {
+    return {
+      titleId: "felt-warning-title-posture-unavailable",
+      messageId: "felt-error-warning-posture-unavailable-contact-admin",
+      args,
+    };
+  }
   if (warning.status === "missing") {
     return {
       titleId: "felt-warning-title-posture-tool-missing",

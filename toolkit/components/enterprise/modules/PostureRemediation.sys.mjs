@@ -20,6 +20,8 @@ ChromeUtils.defineESModuleGetters(lazy, {
     "resource://gre/modules/enterprise/EnterpriseCommon.sys.mjs",
   isTesting: "resource://gre/modules/enterprise/EnterpriseCommon.sys.mjs",
   BIN_DIRS: "resource://gre/modules/enterprise/PostureToolCatalog.sys.mjs",
+  BREW_CANDIDATES:
+    "resource://gre/modules/enterprise/PostureToolCatalog.sys.mjs",
   PostureToolCatalog:
     "resource://gre/modules/enterprise/PostureToolCatalog.sys.mjs",
   LocalFileSource:
@@ -43,6 +45,8 @@ const BACKOFF_CAP_MS = 4 * 60 * 60 * 1000;
 const BACKOFF_JITTER = 0.2;
 const MAX_ATTEMPTS = 6;
 const TOOL_PROBE_TIMEOUT_MS = 5000;
+// Longer than a plain --version: brew reads its own metadata on first run.
+const BREW_PROBE_TIMEOUT_MS = 30000;
 const TERM_GRACE_MS = 5000;
 const MAX_CAPTURE_BYTES = 64 * 1024;
 
@@ -149,11 +153,25 @@ export function nextAttemptDelay(attempts, random = Math.random) {
  * @param {string} options.required Normalized required version.
  * @param {boolean} options.supported Whether this platform can probe the tool.
  * @param {boolean} options.probeFailed Whether the probe itself errored.
- * @returns {string} One of compliant|missing|outdated|unknown|unsupported|check-failed
+ * @param {boolean} [options.packageManagerMissing] Whether the tool is managed
+ *   by a package manager this device does not have.
+ * @returns {string} One of
+ *   compliant|missing|outdated|unknown|unsupported|check-failed|unavailable
  */
-export function decideStatus({ installed, required, supported, probeFailed }) {
+export function decideStatus({
+  installed,
+  required,
+  supported,
+  probeFailed,
+  packageManagerMissing = false,
+}) {
   if (!supported) {
     return "unsupported";
+  }
+  // Nothing can be determined *or* fixed here until an admin provisions the
+  // package manager, which is a different message from a failed probe.
+  if (packageManagerMissing) {
+    return "unavailable";
   }
   if (probeFailed) {
     return "check-failed";
@@ -347,7 +365,8 @@ export const PostureRemediation = {
       r =>
         r.status === "missing" ||
         r.status === "outdated" ||
-        r.status === "blocked"
+        r.status === "blocked" ||
+        r.status === "unavailable"
     );
     if (!offender) {
       return null;
@@ -404,7 +423,17 @@ export const PostureRemediation = {
       required: lazy.PostureToolCatalog.normalizeVersion(record.required),
       supported: !!entry,
       probeFailed: detected.failed,
+      packageManagerMissing: !!detected.packageManagerMissing,
     });
+
+    if (record.status === "unavailable") {
+      // Deliberately consumes no attempt and arms no backoff: spending the
+      // budget on something that cannot work until an admin provisions the
+      // package manager would lose the ability to retry once they do.
+      record.state = "unavailable";
+      record.lastErrorCode = "no-package-manager";
+      return;
+    }
 
     if (record.status === "compliant") {
       record.state = "idle";
@@ -444,6 +473,9 @@ export const PostureRemediation = {
    */
   async _detect(entry) {
     const { detect } = entry;
+    if (detect.kind === "brewFormula") {
+      return this._detectBrewFormula(detect);
+    }
     let command = null;
     for (const dir of lazy.BIN_DIRS) {
       const candidate = PathUtils.join(dir, detect.bin);
@@ -474,6 +506,53 @@ export const PostureRemediation = {
       };
     } catch (e) {
       lazy.log.error(`Version probe for ${command} failed:`, e);
+      return { version: null, failed: true };
+    }
+  },
+
+  /**
+   * Reads a formula's installed version from Homebrew.
+   *
+   * Answers a narrower question than commandVersion -- "does brew own a
+   * compliant copy", not "is the tool the user would run compliant" -- which
+   * is the right question for a tool brew is also expected to remediate.
+   *
+   * @param {object} detect Catalog entry's detect descriptor.
+   * @returns {Promise<{version: string|null, failed: boolean, packageManagerMissing?: boolean}>}
+   */
+  async _detectBrewFormula(detect) {
+    let brew = null;
+    for (const candidate of lazy.BREW_CANDIDATES) {
+      if (await IOUtils.exists(candidate)) {
+        brew = candidate;
+        break;
+      }
+    }
+    if (!brew) {
+      return { version: null, failed: false, packageManagerMissing: true };
+    }
+
+    try {
+      const { exitCode, stdout } = await this._run({
+        command: brew,
+        args: ["list", "--versions", detect.formula],
+        timeoutMs: BREW_PROBE_TIMEOUT_MS,
+        environment: this._environment(),
+      });
+      // A formula that is not installed prints nothing and exits non-zero;
+      // that is "missing", not a failed probe.
+      if (exitCode !== 0) {
+        return { version: null, failed: false };
+      }
+      return {
+        version: lazy.PostureToolCatalog.parseBrewVersions(
+          stdout,
+          detect.formula
+        ),
+        failed: false,
+      };
+    } catch (e) {
+      lazy.log.error(`brew probe for ${detect.formula} failed:`, e);
       return { version: null, failed: true };
     }
   },

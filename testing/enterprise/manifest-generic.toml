@@ -26,6 +26,10 @@ subsuite = "enterprise"
 
 ["test_felt_init_failures.py"]
 
+# macOS-only: Homebrew-backed detection.
+["test_felt_posture_brew.py"]
+run-if = ["os == 'mac'"]
+
 # macOS-only: the signed fixture declares platform "macosx" and its script
 # uses /usr/bin/open.
 ["test_felt_posture_remediation.py"]

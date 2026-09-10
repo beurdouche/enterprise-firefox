@@ -46,6 +46,39 @@ add_task(function test_normalize_version_shapes() {
   Assert.equal(norm(42), null);
 });
 
+add_task(function test_parse_brew_versions() {
+  const parse = (out, formula) =>
+    PostureToolCatalog.parseBrewVersions(out, formula);
+
+  Assert.equal(parse("bash 5.3.15\n", "bash"), "5.3.15");
+  Assert.equal(
+    parse("", "jq"),
+    null,
+    "a formula that is not installed prints nothing"
+  );
+  Assert.equal(
+    parse("python@3.14 3.14.6 3.14.7\n", "python@3.14"),
+    "3.14.7",
+    "a multi-keg formula reports its newest version"
+  );
+  Assert.equal(
+    parse("python@3.14 3.14.7\nbash 5.3.15\n", "bash"),
+    "5.3.15",
+    "only the requested formula's line is read"
+  );
+  Assert.equal(
+    parse("bash 5.3.15\n", "jq"),
+    null,
+    "a different formula is not mistaken for the one asked about"
+  );
+  Assert.equal(
+    parse("jq 1.7_1\n", "jq"),
+    "1.7.1",
+    "brew revision suffixes are normalized on the way in"
+  );
+  Assert.equal(parse(null, "jq"), null);
+});
+
 add_task(function test_decide_status_truth_table() {
   const base = {
     installed: "1.0.0",
@@ -69,6 +102,21 @@ add_task(function test_decide_status_truth_table() {
   );
   Assert.equal(decideStatus({ ...base, supported: false }), "unsupported");
   Assert.equal(decideStatus({ ...base, probeFailed: true }), "check-failed");
+  Assert.equal(
+    decideStatus({ ...base, packageManagerMissing: true }),
+    "unavailable",
+    "no package manager is a different message from a failed probe"
+  );
+  Assert.equal(
+    decideStatus({ ...base, packageManagerMissing: true, probeFailed: true }),
+    "unavailable",
+    "a missing package manager outranks a failed probe"
+  );
+  Assert.equal(
+    decideStatus({ ...base, supported: false, packageManagerMissing: true }),
+    "unsupported",
+    "an unsupported platform still outranks everything"
+  );
   Assert.equal(
     decideStatus({ ...base, supported: false, probeFailed: true }),
     "unsupported",
@@ -112,6 +160,23 @@ add_task(function test_catalog_lookup_rejects_prototype_keys() {
   Assert.equal(PostureToolCatalog.lookup("toString"), null);
   Assert.ok(!PostureToolCatalog.isKnownId("constructor"));
   Assert.ok(!PostureToolCatalog.isKnownId("hasOwnProperty"));
+});
+
+add_task(function test_brew_catalog_entries() {
+  for (const id of ["jq", "bash"]) {
+    Assert.ok(PostureToolCatalog.isKnownId(id), `${id} is a known tool`);
+    const entry = PostureToolCatalog.lookup(id, "macosx");
+    Assert.equal(entry.detect.kind, "brewFormula", `${id} is brew-managed`);
+    Assert.equal(entry.detect.formula, id);
+  }
+
+  const { BREW_CANDIDATES } = ChromeUtils.importESModule(
+    "resource://gre/modules/enterprise/PostureToolCatalog.sys.mjs"
+  );
+  for (const candidate of BREW_CANDIDATES) {
+    Assert.ok(candidate.startsWith("/"), `${candidate} is absolute`);
+    Assert.ok(candidate.endsWith("/brew"), `${candidate} names brew`);
+  }
 });
 
 add_task(function test_catalog_known_entry() {
