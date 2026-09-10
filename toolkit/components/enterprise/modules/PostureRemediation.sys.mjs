@@ -13,6 +13,8 @@
  * session -- a user signing out and back in must not reset it.
  */
 
+import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
+
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
@@ -64,6 +66,24 @@ const MAX_ATTEMPTS_PREF = "enterprise.posture.remediation.max_attempts";
 const LOCAL_SOURCE_DIR_PREF = "enterprise.posture.remediation.local_dir";
 
 const ARTIFACT_DIR_NAME = "posture-remediation";
+
+/**
+ * Requirements to use when the console sends none, in the console's own wire
+ * format. A development affordance: the console cannot serve required_tools
+ * yet, and the login path clears an absent list, so without this there is no
+ * way to exercise remediation outside the test harness.
+ *
+ * Gated on a build that cannot ship -- MOZ_UPDATE_CHANNEL is only "default"
+ * for a plain mozconfig, the same fence bypass_allowed() puts around
+ * MOZ_BYPASS_FELT -- as well as the testing pref. Setting this on a release
+ * build does nothing.
+ */
+const SEED_REQUIREMENTS_PREF =
+  "enterprise.posture.remediation.seed_requirements";
+
+function seedingAllowed() {
+  return AppConstants.MOZ_UPDATE_CHANNEL === "default" && lazy.isTesting();
+}
 
 /**
  * The tools the console requires, as a JSON string. Absent, empty or malformed
@@ -256,11 +276,51 @@ export const PostureRemediation = {
       lazy.log.error(`Malformed ${REQUIRED_TOOLS_PREF}, requiring nothing:`, e);
       parsed = [];
     }
-    this.configure(
-      parsed.filter(
-        e => typeof e?.id === "string" && typeof e?.minVersion === "string"
-      )
+    let requirements = parsed.filter(
+      e => typeof e?.id === "string" && typeof e?.minVersion === "string"
     );
+    if (!requirements.length) {
+      requirements = this._seedRequirements();
+    }
+    this.configure(requirements);
+  },
+
+  /**
+   * Development-only requirements from SEED_REQUIREMENTS_PREF. Returns nothing
+   * unless seedingAllowed(), and validates through the same catalog the
+   * console's list goes through, so a seeded requirement behaves identically
+   * to a real one.
+   *
+   * @returns {Array<{id: string, minVersion: string}>}
+   */
+  _seedRequirements() {
+    if (!seedingAllowed()) {
+      return [];
+    }
+    try {
+      const raw = Services.prefs.getStringPref(SEED_REQUIREMENTS_PREF, "");
+      if (!raw) {
+        return [];
+      }
+      const value = JSON.parse(raw);
+      const seeded = (Array.isArray(value) ? value : [])
+        .map(entry => lazy.PostureToolCatalog.validateRequirement(entry))
+        .filter(Boolean);
+      if (seeded.length) {
+        lazy.log.warn(
+          `Seeding ${seeded.length} requirement(s) from ` +
+            `${SEED_REQUIREMENTS_PREF}. This is a development-only path and ` +
+            `is unreachable in a shipping build.`
+        );
+      }
+      return seeded;
+    } catch (e) {
+      lazy.log.error(
+        `Malformed ${SEED_REQUIREMENTS_PREF}, seeding nothing:`,
+        e
+      );
+      return [];
+    }
   },
 
   /** Stops scheduling. Does not kill a running child; see _run(). */

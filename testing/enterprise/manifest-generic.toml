@@ -35,6 +35,10 @@ run-if = ["os == 'mac'"]
 ["test_felt_posture_remediation.py"]
 run-if = ["os == 'mac'"]
 
+# macOS-only: same fixture and script as the remediation test.
+["test_felt_posture_seed.py"]
+run-if = ["os == 'mac'"]
+
 ["test_felt_restart_is_quit.py"]
 
 ["test_felt_restart_works.py"]

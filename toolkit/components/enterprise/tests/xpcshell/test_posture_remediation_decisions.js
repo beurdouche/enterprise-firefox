@@ -6,9 +6,13 @@
 const { PostureToolCatalog } = ChromeUtils.importESModule(
   "resource://gre/modules/enterprise/PostureToolCatalog.sys.mjs"
 );
-const { decideStatus, nextAttemptDelay } = ChromeUtils.importESModule(
-  "resource://gre/modules/enterprise/PostureRemediation.sys.mjs"
-);
+const { decideStatus, nextAttemptDelay, PostureRemediation } =
+  ChromeUtils.importESModule(
+    "resource://gre/modules/enterprise/PostureRemediation.sys.mjs"
+  );
+
+const SEED_PREF = "enterprise.posture.remediation.seed_requirements";
+const TESTING_PREF = "enterprise.is_testing";
 
 const norm = v => PostureToolCatalog.normalizeVersion(v);
 
@@ -239,4 +243,62 @@ add_task(function test_bin_dirs_are_absolute() {
   for (const dir of BIN_DIRS) {
     Assert.ok(dir.startsWith("/"), `${dir} is absolute`);
   }
+});
+
+add_task(function test_seed_requires_the_testing_gate() {
+  // The seed injects requirements the console never sent, so it must be
+  // unreachable unless explicitly enabled.
+  Services.prefs.setStringPref(
+    SEED_PREF,
+    JSON.stringify([{ id: "curl", min_version: "1.0.0" }])
+  );
+  registerCleanupFunction(() => {
+    Services.prefs.clearUserPref(SEED_PREF);
+    Services.prefs.clearUserPref(TESTING_PREF);
+  });
+
+  Services.prefs.setBoolPref(TESTING_PREF, false);
+  Assert.deepEqual(
+    PostureRemediation._seedRequirements(),
+    [],
+    "a set seed pref does nothing without the testing gate"
+  );
+
+  Services.prefs.setBoolPref(TESTING_PREF, true);
+  Assert.deepEqual(
+    PostureRemediation._seedRequirements(),
+    [{ id: "curl", minVersion: "1.0.0" }],
+    "with the gate open the seed is normalized like a console directive"
+  );
+});
+
+add_task(function test_seed_is_validated_like_a_console_directive() {
+  Services.prefs.setBoolPref(TESTING_PREF, true);
+  registerCleanupFunction(() => {
+    Services.prefs.clearUserPref(SEED_PREF);
+    Services.prefs.clearUserPref(TESTING_PREF);
+  });
+
+  // Unknown ids, junk versions and path-shaped ids go through the same
+  // catalog validation the console's list does, so the seed cannot widen
+  // what a requirement is allowed to name.
+  Services.prefs.setStringPref(
+    SEED_PREF,
+    JSON.stringify([
+      { id: "curl", min_version: "1.0.0" },
+      { id: "definitely-not-a-tool", min_version: "1.0.0" },
+      { id: "../../bin/sh", min_version: "1.0.0" },
+      { id: "curl", min_version: "; rm -rf /" },
+    ])
+  );
+  Assert.deepEqual(PostureRemediation._seedRequirements(), [
+    { id: "curl", minVersion: "1.0.0" },
+  ]);
+
+  Services.prefs.setStringPref(SEED_PREF, "not json at all");
+  Assert.deepEqual(
+    PostureRemediation._seedRequirements(),
+    [],
+    "a malformed seed pref seeds nothing rather than throwing"
+  );
 });
