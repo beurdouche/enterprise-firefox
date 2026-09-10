@@ -12,6 +12,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
   ConsoleClient: "resource://gre/modules/enterprise/ConsoleClient.sys.mjs",
   FeltCommon: "chrome://felt/content/FeltCommon.sys.mjs",
   FeltErrorReport: "resource://gre/modules/enterprise/FeltErrorReport.sys.mjs",
+  PostureWarning: "resource://gre/modules/enterprise/PostureWarning.sys.mjs",
   ERROR_SOURCE: "resource://gre/modules/enterprise/FeltErrorReport.sys.mjs",
   FeltStorage: "resource://gre/modules/enterprise/FeltStorage.sys.mjs",
   PopupNotifications: "resource://gre/modules/PopupNotifications.sys.mjs",
@@ -94,6 +95,9 @@ function resetToLoginPage({ keepPendingSignIn = false } = {}) {
     .querySelector(".felt-login__email-pane")
     .classList.remove("is-hidden");
   document.getElementById("felt-back-button").classList.add("is-hidden");
+  // FeltErrorReport.reset() hid every bar in the container on the way into
+  // SSO, so bring the posture warning back for the login screen.
+  lazy.PostureWarning.refresh();
 }
 
 function resetToLoginPageWithError(errorType, details = null, cause = null) {
@@ -577,6 +581,7 @@ window.addEventListener(
   () => {
     setBuildVersion();
     lazy.FeltErrorReport.init(document);
+    lazy.PostureWarning.init(document);
     setupMarionetteEnvironment();
     setupPopupNotifications();
     setupContextMenu();

@@ -105,6 +105,22 @@ felt-warning-title-download-attempt-failed =
     .heading = Update couldn’t be downloaded
 felt-error-warning-download-attempt-failed-contact-admin = The latest update couldn’t be downloaded. If this problem persists, contact your administrator for help.
 
+## Device posture: software your organization requires on this device.
+## $tool is a command-line tool name, $version the version required.
+
+felt-warning-title-posture-tool-outdated =
+    .heading = Required software is out of date
+felt-error-warning-posture-tool-outdated = Your organization requires { $tool } version { $version } or later on this device. { -brand-short-name } is updating it.
+felt-warning-title-posture-tool-missing =
+    .heading = Required software is missing
+felt-error-warning-posture-tool-missing = Your organization requires { $tool } on this device, but it isn’t installed. { -brand-short-name } is installing it.
+felt-warning-title-posture-remediation-failed =
+    .heading = Required software couldn’t be updated
+felt-error-warning-posture-remediation-failed-contact-admin = { -brand-short-name } couldn’t update { $tool } to version { $version }. Please contact your administrator.
+felt-warning-title-posture-blocked =
+    .heading = Software update couldn’t be verified
+felt-error-warning-posture-blocked-contact-admin = { -brand-short-name } couldn’t verify the update it was asked to install for { $tool }, so it didn’t run it. Please contact your administrator.
+
 felt-back-button = Back to login
 
 ## Console setup dialog, shown before anything else on generic builds where no

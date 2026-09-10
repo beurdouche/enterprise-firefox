@@ -56,6 +56,7 @@ class FeltPostureRemediation(FeltTests):
         state = self.run_remediation_runs()
         self.run_artifact_written()
         self.run_replay_is_refused()
+        self.run_warning_is_shown()
         self.run_reported_to_console()
         self.run_change_gate_is_not_defeated()
         return state
@@ -154,6 +155,56 @@ class FeltPostureRemediation(FeltTests):
             f"the earlier successful attempt should still be reported: {record}"
         )
         assert record["lastExitCode"] == 0, record
+
+    def run_warning_is_shown(self):
+        """The user is told, in the FELT login window.
+
+        Reads the rendered heading rather than the l10n id, so a missing or
+        misspelled Fluent string fails here instead of quietly showing an
+        empty bar."""
+        rendered = json.loads(
+            self._felt_script(
+                """
+                const [resolve] = arguments;
+                const bar = document.querySelector(".felt-posture-warning-messages");
+                if (!bar) {
+                  resolve(JSON.stringify({ error: "no bar in the document" }));
+                } else {
+                  document.l10n.translateElements([bar]).then(() => {
+                    const details = bar.querySelector(".felt-browser-error-details");
+                    resolve(JSON.stringify({
+                      hidden: bar.classList.contains("is-hidden"),
+                      headingId: bar.getAttribute("data-l10n-id"),
+                      heading: bar.getAttribute("heading"),
+                      message: details ? details.textContent : null,
+                    }));
+                  }, e => resolve(JSON.stringify({ error: String(e) })));
+                }
+                """
+            )
+        )
+        assert "error" not in rendered, rendered
+        assert not rendered["hidden"], f"the posture warning should be visible: {rendered}"
+        assert rendered["headingId"].startswith("felt-warning-title-posture-"), rendered
+        assert rendered["heading"], (
+            f"heading did not resolve, so the Fluent id is missing: {rendered}"
+        )
+        assert "curl" in (rendered["message"] or ""), (
+            f"the message should name the tool: {rendered}"
+        )
+        # It must be its own bar: sharing the updates one would let the two
+        # clobber each other's heading.
+        updates_heading = self._felt_script(
+            """
+            const [resolve] = arguments;
+            const bar = document.querySelector(".felt-updates-warning-messages");
+            resolve(bar ? String(bar.getAttribute("heading")) : "missing");
+            """
+        )
+        assert updates_heading in ("null", "missing", ""), (
+            f"the posture warning leaked into the updates bar: {updates_heading!r}"
+        )
+        self._logger.info(f"Felt UI warning: {rendered}")
 
     def _device_posture(self):
         r = requests.get(f"http://localhost:{self.console_port}/sso/get_device_posture")

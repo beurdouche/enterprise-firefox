@@ -178,6 +178,7 @@ export const PostureRemediation = {
   _paused: false,
   _published: Object.freeze([]),
   _onWarning: null,
+  _lastWarningKey: "",
 
   /**
    * Applies the console's requirement list.
@@ -333,34 +334,51 @@ export const PostureRemediation = {
   },
 
   /**
-   * Registers a callback invoked with the current worst-case warning, or null.
+   * The warning the UI should show, or null when nothing needs attention.
    *
-   * @param {(warning: object|null) => void} callback
+   * Picks the first offender in id order rather than the most recently
+   * updated one, so the message does not flip between tools depending on
+   * which cycle finished last.
+   *
+   * @returns {{toolId: string, required: string, status: string, state: string}|null}
    */
-  setWarningListener(callback) {
-    this._onWarning = callback;
-  },
-
-  _notifyWarning() {
-    if (!this._onWarning) {
-      return;
-    }
+  currentWarning() {
     const offender = this._published.find(
       r =>
         r.status === "missing" ||
         r.status === "outdated" ||
         r.status === "blocked"
     );
-    this._onWarning(
-      offender
-        ? {
-            toolId: offender.id,
-            version: offender.required,
-            status: offender.status,
-            exhausted: offender.remediation.state === "exhausted",
-          }
-        : null
-    );
+    if (!offender) {
+      return null;
+    }
+    return {
+      toolId: offender.id,
+      required: offender.required,
+      status: offender.status,
+      state: offender.remediation.state,
+    };
+  },
+
+  /**
+   * Registers the UI callback. Only one listener, set by PostureWarning.init.
+   *
+   * @param {((warning: object|null) => void)|null} callback
+   */
+  setWarningListener(callback) {
+    this._onWarning = callback;
+  },
+
+  _notifyWarning() {
+    const warning = this.currentWarning();
+    // Fires on transitions only. Every cycle recomputes this, and re-rendering
+    // an unchanged bar would reset its dismissed state on a 5-minute tick.
+    const key = warning ? JSON.stringify(warning) : "";
+    if (key === this._lastWarningKey) {
+      return;
+    }
+    this._lastWarningKey = key;
+    this._onWarning?.(warning);
   },
 
   async _cycle() {
