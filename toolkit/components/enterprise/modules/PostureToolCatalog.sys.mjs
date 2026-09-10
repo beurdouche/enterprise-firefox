@@ -59,6 +59,16 @@ const CATALOG = Object.freeze(
         }),
       }),
     }),
+    // Not a single tool: "is anything Homebrew manages out of date". The
+    // detector names the offender, so the requirement carries no version.
+    "brew-outdated": Object.freeze({
+      id: "brew-outdated",
+      platforms: Object.freeze({
+        macosx: Object.freeze({
+          detect: Object.freeze({ kind: "brewOutdated" }),
+        }),
+      }),
+    }),
     bash: Object.freeze({
       id: "bash",
       platforms: Object.freeze({

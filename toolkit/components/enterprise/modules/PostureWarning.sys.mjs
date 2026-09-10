@@ -41,8 +41,20 @@ const SSO_PANE_SELECTOR = ".felt-login__sso";
  * @returns {{titleId: string, messageId: string, args: object}}
  */
 function describe(warning) {
-  const args = { tool: warning.toolId, version: warning.required };
+  // A detector that found the offender itself (brewOutdated) names a package
+  // rather than the requirement, and there is no version to quote.
+  const args = {
+    tool: warning.detail ?? warning.toolId,
+    version: warning.required,
+  };
 
+  if (warning.state === "running") {
+    return {
+      titleId: "felt-warning-title-posture-updating",
+      messageId: "felt-error-warning-posture-updating",
+      args,
+    };
+  }
   if (warning.state === "blocked") {
     return {
       titleId: "felt-warning-title-posture-blocked",
@@ -73,7 +85,9 @@ function describe(warning) {
   }
   return {
     titleId: "felt-warning-title-posture-tool-outdated",
-    messageId: "felt-error-warning-posture-tool-outdated",
+    messageId: warning.detail
+      ? "felt-error-warning-posture-package-outdated"
+      : "felt-error-warning-posture-tool-outdated",
     args,
   };
 }
@@ -162,6 +176,10 @@ export const PostureWarning = {
    * @param {boolean} held
    */
   _onGateChanged(held) {
+    lazy.log.info(
+      `Launch gate ${held ? "holding" : "released"}; Felt window ` +
+        `${this._doc ? "present" : "absent"}`
+    );
     if (!this._doc || !held) {
       return;
     }
@@ -181,6 +199,7 @@ export const PostureWarning = {
     }
     const button = this._doc.getElementById(BUTTON_ID);
     if (!this._pending) {
+      lazy.log.info("Posture warning: nothing to show, hiding the bar.");
       bar.classList.add("is-hidden");
       button?.classList.add("is-hidden");
       return;
@@ -196,13 +215,20 @@ export const PostureWarning = {
     // case where the user has no other way forward. In warn mode the browser
     // is about to appear anyway, so a button would be pointless and would
     // likely be clicked after the bar had gone.
+    const running = this._pending.state === "running";
     const offerAction =
       lazy.PostureRemediation.enforcement() === "block" &&
       lazy.PostureRemediation.canRemediateNow();
     button?.classList.toggle("is-hidden", !offerAction);
+    if (button) {
+      // Work in progress is the whole reason this is visible; leaving the
+      // button live would invite a second click at the one moment nothing
+      // would come of it.
+      button.disabled = running;
+    }
 
     bar.classList.remove("is-hidden");
-    lazy.log.debug(
+    lazy.log.info(
       `Showing posture warning ${titleId} for ${args.tool}` +
         `${offerAction ? " with a remediate action" : ""}`
     );

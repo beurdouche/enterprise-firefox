@@ -313,6 +313,8 @@ export const PostureRemediation = {
               lastExitCode: null,
               lastAttemptAt: null,
               blockErrorCode: null,
+              detail: null,
+              pinned: null,
               documentCounter: null,
               state: "idle",
               nextAttemptAt: 0,
@@ -405,6 +407,20 @@ export const PostureRemediation = {
     return ENFORCEMENT_MODES.includes(value) ? value : DEFAULT_ENFORCEMENT;
   },
 
+  /** One line describing where every requirement stands, for the log. */
+  _summary() {
+    return (
+      [...this._records.values()]
+        .map(
+          r =>
+            `${r.id} ${r.installed ?? "not-found"}/${r.required} ` +
+            `${r.status}/${r.state} attempts=${r.attempts}` +
+            `${r.blockErrorCode ? ` blocked=${r.blockErrorCode}` : ""}`
+        )
+        .join("; ") || "no requirements"
+    );
+  },
+
   /** Whether every configured requirement is currently compliant. */
   _allCompliant() {
     return [...this._records.values()].every(r => r.status === "compliant");
@@ -447,27 +463,44 @@ export const PostureRemediation = {
    * @returns {Promise<string>} Why it stopped waiting.
    */
   async awaitCompliance({ isCancelled }) {
+    const mode = this.enforcement();
+    lazy.log.info(
+      `Launch gate: enforcement=${mode}, ` +
+        `${this._records.size} requirement(s): ` +
+        `${[...this._records.keys()].join(", ") || "none"}`
+    );
     if (!this._records.size) {
+      lazy.log.info("Launch gate: nothing required, releasing immediately.");
       return "no-requirements";
     }
     if (!Services.felt.isFeltUI()) {
+      lazy.log.info("Launch gate: not the Felt UI process, releasing.");
       return "not-felt";
     }
 
     await this._forceCycle();
+    lazy.log.info(`Launch gate: after first cycle -> ${this._summary()}`);
 
     if (this.enforcement() !== "block") {
       if (this._allCompliant()) {
+        lazy.log.info("Launch gate: compliant, launching now.");
         return "compliant";
       }
       lazy.log.warn(
-        "Device is not compliant; pausing so the warning can be read."
+        `Launch gate: not compliant but enforcement is '${mode}'; pausing ` +
+          `${testNumberPref(WARN_DWELL_PREF, WARN_DWELL_MS)}ms so the warning ` +
+          `can be read, then launching anyway.`
       );
       await this._sleep(testNumberPref(WARN_DWELL_PREF, WARN_DWELL_MS));
       return "warned";
     }
 
-    lazy.log.warn("Enforcement is 'block': holding the browser back.");
+    lazy.log.warn(
+      `Launch gate: enforcement is 'block' and the device is not compliant ` +
+        `(${this._summary()}). Holding the browser back; it will not start ` +
+        `until every requirement is compliant, the console relaxes ` +
+        `enforcement, or the user signs out.`
+    );
     try {
       this._onGateChanged?.(true);
     } catch (e) {
@@ -482,6 +515,7 @@ export const PostureRemediation = {
         (this.enforcement() !== "block" && "relaxed") ||
         (!this._records.size && "no-requirements");
       if (done) {
+        lazy.log.warn(`Launch gate: releasing (${done}); ${this._summary()}`);
         try {
           this._onGateChanged?.(false);
         } catch (e) {
@@ -489,6 +523,7 @@ export const PostureRemediation = {
         }
         return done;
       }
+      lazy.log.info(`Launch gate: still holding; ${this._summary()}`);
       await this._sleep(testNumberPref(GATE_POLL_PREF, GATE_POLL_MS));
       await this._forceCycle();
     }
@@ -601,6 +636,9 @@ export const PostureRemediation = {
           required: r.required,
           installed: r.installed,
           status: r.status,
+          // What the detector actually found, when the requirement is not a
+          // single named tool (see the brewOutdated kind).
+          detail: r.detail,
           remediation: Object.freeze({
             state: r.state,
             attempts: r.attempts,
@@ -641,6 +679,7 @@ export const PostureRemediation = {
     }
     return {
       toolId: offender.id,
+      detail: offender.detail,
       required: offender.required,
       status: offender.status,
       state: offender.remediation.state,
@@ -702,17 +741,24 @@ export const PostureRemediation = {
   async _checkOne(record, now) {
     const entry = lazy.PostureToolCatalog.lookup(record.id);
     const detected = entry
-      ? await this._detect(entry)
+      ? await this._detect(entry, record.pinned)
       : { version: null, failed: false };
 
     record.installed = detected.version;
-    record.status = decideStatus({
-      installed: detected.version,
-      required: lazy.PostureToolCatalog.normalizeVersion(record.required),
-      supported: !!entry,
-      probeFailed: detected.failed,
-      packageManagerMissing: !!detected.packageManagerMissing,
-    });
+    record.detail = detected.detail ?? null;
+    if (detected.pin) {
+      record.pinned = detected.pin;
+      lazy.log.info(`Pinned ${record.id} to ${detected.pin} for this session.`);
+    }
+    record.status = detected.explicitStatus
+      ? detected.explicitStatus
+      : decideStatus({
+          installed: detected.version,
+          required: lazy.PostureToolCatalog.normalizeVersion(record.required),
+          supported: !!entry,
+          probeFailed: detected.failed,
+          packageManagerMissing: !!detected.packageManagerMissing,
+        });
 
     if (record.status === "unavailable") {
       // Deliberately consumes no attempt and arms no backoff: spending the
@@ -723,7 +769,18 @@ export const PostureRemediation = {
       return;
     }
 
+    lazy.log.info(
+      `Posture check: ${record.id} -> ${record.status}` +
+        `${record.detail ? ` (${record.detail})` : ""}` +
+        `${detected.version ? `, found ${detected.version}` : ""}` +
+        `${record.required ? `, needs ${record.required}` : ""}`
+    );
+
     if (record.status === "compliant") {
+      if (record.pinned) {
+        lazy.log.info(`${record.pinned} is no longer outdated; releasing.`);
+        record.pinned = null;
+      }
       record.state = "idle";
       record.attempts = 0;
       record.nextAttemptAt = 0;
@@ -757,12 +814,17 @@ export const PostureRemediation = {
    * directory list is part of the build, not of any input.
    *
    * @param {object} entry Per-platform catalog entry.
+   * @param {string|null} [pinned] Package already named to the user, which
+   *   stays the requirement until it is no longer outdated.
    * @returns {Promise<{version: string|null, failed: boolean}>}
    */
-  async _detect(entry) {
+  async _detect(entry, pinned = null) {
     const { detect } = entry;
     if (detect.kind === "brewFormula") {
       return this._detectBrewFormula(detect);
+    }
+    if (detect.kind === "brewOutdated") {
+      return this._detectBrewOutdated(pinned);
     }
     let command = null;
     for (const dir of lazy.BIN_DIRS) {
@@ -845,9 +907,97 @@ export const PostureRemediation = {
     }
   },
 
+  /**
+   * Asks Homebrew whether anything it manages is out of date.
+   *
+   * Unlike the other detectors this is not about one named tool, so there is
+   * no version to compare: brew has already decided. It reports the verdict
+   * directly and names the first offender for the UI.
+   *
+   * HOMEBREW_NO_AUTO_UPDATE is set here, unlike in the upgrade script: this
+   * is a read of local state on a path a person is waiting on, and refreshing
+   * the index first would make a sign-in wait on the network.
+   *
+   * @param {string|null} [pinned] Package already named to the user, which
+   *   stays the requirement until it is no longer outdated.
+   * @returns {Promise<object>}
+   */
+  async _detectBrewOutdated(pinned = null) {
+    let brew = null;
+    for (const candidate of lazy.BREW_CANDIDATES) {
+      if (await IOUtils.exists(candidate)) {
+        brew = candidate;
+        break;
+      }
+    }
+    if (!brew) {
+      return { version: null, failed: false, packageManagerMissing: true };
+    }
+
+    try {
+      const { exitCode, stdout } = await this._run({
+        command: brew,
+        args: ["outdated", "--quiet"],
+        timeoutMs: BREW_PROBE_TIMEOUT_MS,
+        environment: this._environment({ HOMEBREW_NO_AUTO_UPDATE: "1" }),
+      });
+      if (exitCode !== 0) {
+        return { version: null, failed: true };
+      }
+      const outdated = stdout
+        .split("\n")
+        .map(line => line.trim())
+        .filter(Boolean);
+      lazy.log.info(
+        `brew reports ${outdated.length} outdated formula(e)` +
+          `${outdated.length ? `: ${outdated.slice(0, 5).join(", ")}` : ""}` +
+          `${outdated.length > 5 ? ", ..." : ""}` +
+          `${pinned ? `; watching ${pinned}` : ""}`
+      );
+
+      // Once a package has been named to the user, that package is the
+      // requirement. Re-picking the head of the list each cycle would move
+      // the goalposts every time one was fixed, so a device with several
+      // outdated formulae could never satisfy the gate and the user would
+      // press Fix now forever.
+      if (pinned) {
+        return outdated.includes(pinned)
+          ? {
+              version: null,
+              failed: false,
+              explicitStatus: "outdated",
+              detail: pinned,
+            }
+          : {
+              version: null,
+              failed: false,
+              explicitStatus: "compliant",
+              detail: null,
+            };
+      }
+      if (!outdated.length) {
+        return { version: null, failed: false, explicitStatus: "compliant" };
+      }
+      return {
+        version: null,
+        failed: false,
+        explicitStatus: "outdated",
+        detail: outdated[0],
+        pin: outdated[0],
+      };
+    } catch (e) {
+      lazy.log.error("brew outdated probe failed:", e);
+      return { version: null, failed: true };
+    }
+  },
+
   async _attempt(record, now) {
     record.state = "running";
     this._publish();
+    // Publishing is not enough: the warning listener only fires from the end
+    // of a cycle, so without this the UI would first learn about the work
+    // after it had already finished -- and a brew upgrade can take minutes.
+    this._notifyWarning();
 
     let verified;
     try {
@@ -873,6 +1023,11 @@ export const PostureRemediation = {
       return;
     }
 
+    lazy.log.info(
+      `Remediation: verified document for ${record.id} ` +
+        `(counter ${verified.manifest.counter}, target ` +
+        `${verified.manifest.targetVersion}, from ${verified.origin}); running.`
+    );
     record.blockedUntil = 0;
     record.blockErrorCode = null;
     record.attempts += 1;
@@ -888,6 +1043,11 @@ export const PostureRemediation = {
     record.documentCounter = verified.manifest.counter;
 
     const result = await this._execute(verified);
+    lazy.log.info(
+      `Remediation: ${record.id} attempt ${record.attempts} -> ` +
+        `${result.outcome}${result.errorCode ? ` (${result.errorCode})` : ""}` +
+        `${result.exitCode === null ? "" : ` exit ${result.exitCode}`}`
+    );
     record.lastOutcome = result.outcome;
     record.lastErrorCode = result.errorCode;
     record.lastExitCode = result.exitCode;

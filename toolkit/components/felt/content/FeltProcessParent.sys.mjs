@@ -661,6 +661,23 @@ export class FeltProcessParent extends JSProcessActorParent {
     // making us trying to close a Felt window that was not re-opened.
     // Since there is no message sent on browser process exit in both cases,
     // then make sure to also not send a matching starting message.
+    // Posture is resolved before Felt gives up its window, and before the
+    // primarySecret is fetched. Both orderings matter: "block" can hold here
+    // indefinitely, so Felt must not sit on the storage-encryption secret
+    // while it waits, and it must not hide the only UI that can explain why
+    // no browser is coming -- or offer the button to fix it.
+    // A fixed short interval: the console's polling_frequency is not known
+    // until the Firefox config is applied, which needs the browser.
+    this._startPostureMonitor(GATE_MONITOR_INTERVAL_MS);
+    const gate = await lazy.PostureRemediation.awaitCompliance({
+      isCancelled: () => this.logoutReported,
+    });
+    lazy.log.info(`Posture gate released: ${gate}; continuing to launch.`);
+    if (gate === "cancelled") {
+      lazy.log.warn("Session ended while posture was holding the launch.");
+      return;
+    }
+
     if (startReason === PROCESS_START_REASON.INITIAL_START) {
       Services.cpmm.sendAsyncMessage("FeltParent:TransitionFeltToBackground", {
         startReason,
@@ -672,22 +689,6 @@ export class FeltProcessParent extends JSProcessActorParent {
         Services.obs.addObserver(this.browserObserver, aTopic);
       });
       gObserversRegistered = true;
-    }
-
-    // Posture is evaluated before the browser exists, and deliberately
-    // before the primarySecret is fetched: "block" enforcement can hold here
-    // indefinitely, and Felt must not sit on the storage-encryption secret
-    // while it waits.
-    // A fixed short interval: the console's polling_frequency is not known
-    // until the Firefox config is applied, which needs the browser.
-    this._startPostureMonitor(GATE_MONITOR_INTERVAL_MS);
-    const gate = await lazy.PostureRemediation.awaitCompliance({
-      isCancelled: () => this.logoutReported,
-    });
-    lazy.log.debug(`Posture gate released: ${gate}`);
-    if (gate === "cancelled") {
-      lazy.log.warn("Session ended while posture was holding the launch.");
-      return;
     }
 
     // Fetch primarySecret from the console BEFORE spawning Firefox. The child's
