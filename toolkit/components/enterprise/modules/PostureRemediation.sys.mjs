@@ -748,8 +748,17 @@ export const PostureRemediation = {
     }
   },
 
-  async _checkOne(record, now) {
-    const entry = lazy.PostureToolCatalog.lookup(record.id);
+  /**
+   * Probes one requirement and writes the verdict onto its record.
+   *
+   * Separate from _checkOne so it can be run again straight after a
+   * successful remediation, rather than leaving a stale verdict on display
+   * until the next cycle.
+   *
+   * @param {object} record
+   * @param {object|null} entry Per-platform catalog entry, or null.
+   */
+  async _evaluate(record, entry) {
     const detected = entry
       ? await this._detect(entry, record.pinned)
       : { version: null, failed: false };
@@ -770,6 +779,34 @@ export const PostureRemediation = {
           packageManagerMissing: !!detected.packageManagerMissing,
         });
 
+    lazy.log.info(
+      `Posture check: ${record.id} -> ${record.status}` +
+        `${record.detail ? ` (${record.detail})` : ""}` +
+        `${detected.version ? `, found ${detected.version}` : ""}` +
+        `${record.required ? `, needs ${record.required}` : ""}`
+    );
+    return detected;
+  },
+
+  /**
+   * Marks a record satisfied, dropping any package it had pinned.
+   *
+   * @param {object} record
+   */
+  _markCompliant(record) {
+    if (record.pinned) {
+      lazy.log.info(`${record.pinned} is no longer outdated; releasing.`);
+      record.pinned = null;
+    }
+    record.state = "idle";
+    record.attempts = 0;
+    record.nextAttemptAt = 0;
+  },
+
+  async _checkOne(record, now) {
+    const entry = lazy.PostureToolCatalog.lookup(record.id);
+    await this._evaluate(record, entry);
+
     if (record.status === "unavailable") {
       // Deliberately consumes no attempt and arms no backoff: spending the
       // budget on something that cannot work until an admin provisions the
@@ -779,21 +816,8 @@ export const PostureRemediation = {
       return;
     }
 
-    lazy.log.info(
-      `Posture check: ${record.id} -> ${record.status}` +
-        `${record.detail ? ` (${record.detail})` : ""}` +
-        `${detected.version ? `, found ${detected.version}` : ""}` +
-        `${record.required ? `, needs ${record.required}` : ""}`
-    );
-
     if (record.status === "compliant") {
-      if (record.pinned) {
-        lazy.log.info(`${record.pinned} is no longer outdated; releasing.`);
-        record.pinned = null;
-      }
-      record.state = "idle";
-      record.attempts = 0;
-      record.nextAttemptAt = 0;
+      this._markCompliant(record);
       return;
     }
     if (record.status !== "missing" && record.status !== "outdated") {
@@ -824,6 +848,18 @@ export const PostureRemediation = {
       return;
     }
     await this._attempt(record, now);
+
+    // Re-probe straight away rather than waiting for the next cycle. Without
+    // this the record still carries the pre-remediation verdict when the
+    // cycle publishes, so the UI drops back to "out of date" for a few
+    // seconds after the work finished, and the gate holds longer than it
+    // needs to.
+    if (record.lastOutcome === Outcome.SUCCEEDED) {
+      await this._evaluate(record, entry);
+      if (record.status === "compliant") {
+        this._markCompliant(record);
+      }
+    }
   },
 
   /**
