@@ -18,6 +18,8 @@ const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
   OSKeyStore: "resource://gre/modules/OSKeyStore.sys.mjs",
   BrowserWindowTracker: "resource:///modules/BrowserWindowTracker.sys.mjs",
+  EnterpriseStorageEncryption:
+    "resource://gre/modules/enterprise/EnterpriseStorageEncryption.sys.mjs",
   NewPasswordModel: "resource://gre/modules/shared/NewPasswordModel.sys.mjs",
 });
 
@@ -1735,21 +1737,25 @@ export const LoginHelper = {
     // that the token is deliberately logged out and decline to prompt.
     gPrimaryPasswordReauthDepth++;
     try {
-      const isEnterpriseManagedPrimaryPassword =
-        this.isEnterpriseManagedPrimaryPassword();
-      // If enterprise storage management is enabled but the token is still locked,
-      // bail out without prompting so callers can retry after the enterprise secret
-      // (which the user does not know) becomes available.
-      if (isEnterpriseManagedPrimaryPassword && !token.isLoggedIn) {
-        console.warn(
-          "LoginHelper.requestReauth: Enterprise-managed primary password is locked and OS auth is unavailable; deferring reauth."
-        );
+      if (this.isEnterpriseManagedPrimaryPassword()) {
+        // The user does not know the console-managed primary password, so a
+        // locked token is logged back in with the console secret instead of
+        // prompting, and the request fails closed when that is not possible.
+        if (
+          !token.isLoggedIn &&
+          !(await lazy.EnterpriseStorageEncryption.relogin())
+        ) {
+          console.warn(
+            "LoginHelper.requestReauth: Enterprise-managed primary password is locked and could not be unlocked with the console secret."
+          );
+        }
+        isAuthorized = token.isLoggedIn;
         telemetryEvent = {
           name: "reauthenticateMasterPassword",
-          value: "fail",
+          value: isAuthorized ? "success" : "fail",
         };
         return {
-          isAuthorized: false,
+          isAuthorized,
           telemetryEvent,
         };
       }
@@ -1765,14 +1771,9 @@ export const LoginHelper = {
       }
 
       try {
-        if (isEnterpriseManagedPrimaryPassword) {
-          // Enterprise builds rely on the backend-provided secret rather than forcing a logout.
-          await token.login();
-        } else {
-          // Force a logout and prompt even if the token had been unlocked earlier.
-          await token.logout();
-          await token.login();
-        }
+        // Force a logout and prompt even if the token had been unlocked earlier.
+        await token.logout();
+        await token.login();
         // clicking 'Cancel' or entering the correct password.
       } catch (e) {
         // An exception will be thrown if the user cancels the login prompt

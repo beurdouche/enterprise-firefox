@@ -12,6 +12,8 @@ ChromeUtils.defineESModuleGetters(lazy, {
   LoginHelper: "resource://gre/modules/LoginHelper.sys.mjs",
 
   AsyncShutdown: "resource://gre/modules/AsyncShutdown.sys.mjs",
+  EnterpriseStorageEncryption:
+    "resource://gre/modules/enterprise/EnterpriseStorageEncryption.sys.mjs",
 });
 
 ChromeUtils.defineLazyGetter(
@@ -322,6 +324,10 @@ class RustLoginStorageAuthenticator extends PrimaryPasswordAuthenticator {
   // the resulting store failure into NS_ERROR_ABORT (matching crypto-SDR).
   authCanceled = false;
 
+  // Set when NSS rejected the console secret, so that the retry loop in Rust
+  // ends instead of fetching the same secret again.
+  #enterpriseSecretRejected = false;
+
   constructor() {
     super();
     this.#logger = lazy.LoginHelper.createLogger(
@@ -334,6 +340,9 @@ class RustLoginStorageAuthenticator extends PrimaryPasswordAuthenticator {
   // calling get_key(), so this method is always invoked serially.
   async getPrimaryPassword() {
     this.#logger.log("getPrimaryPassword called");
+    if (lazy.LoginHelper.isEnterpriseManagedPrimaryPassword()) {
+      return this.#getEnterprisePrimarySecret();
+    }
     // Removed by bug 2067167. Declining is a workaround for requestReauth()
     // locking the token out from under in-flight store operations; once re-auth
     // stops relocking the token there is nothing left to decline.
@@ -372,12 +381,35 @@ class RustLoginStorageAuthenticator extends PrimaryPasswordAuthenticator {
     }
   }
 
+  // The console secret is the token password, and the user does not know it.
+  // Hand it to Rust so the token is logged back in without a prompt; when the
+  // secret is unavailable or rejected, fail the store operation instead.
+  async #getEnterprisePrimarySecret() {
+    if (this.#enterpriseSecretRejected) {
+      this.#enterpriseSecretRejected = false;
+      this.authCanceled = true;
+      throw new AuthenticationCanceled("Enterprise primary secret rejected");
+    }
+    this.authCanceled = false;
+    try {
+      return await lazy.EnterpriseStorageEncryption.fetchPrimarySecret();
+    } catch (e) {
+      this.#logger.log(`failed to fetch the enterprise primary secret: ${e}`);
+      this.authCanceled = true;
+      throw new AuthenticationCanceled("Enterprise primary secret unavailable");
+    }
+  }
+
   async onAuthenticationSuccess() {
+    this.#enterpriseSecretRejected = false;
     Services.obs.notifyObservers(null, "passwordmgr-crypto-login");
     this.#logger.log("authenticated with success");
   }
 
   async onAuthenticationFailure() {
+    if (lazy.LoginHelper.isEnterpriseManagedPrimaryPassword()) {
+      this.#enterpriseSecretRejected = true;
+    }
     this.#logger.log("failed to authenticate");
   }
 }
